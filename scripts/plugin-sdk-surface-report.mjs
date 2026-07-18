@@ -267,7 +267,8 @@ export function readPluginSdkSurfaceBudgets(env = process.env) {
       // +1: async memory prompt preparation registration.
       // +4: gateway-backed harness question runner, claim/cancel helpers, and caller type.
       // Harvest: internal question runtime exports -2.
-      8155,
+      // +1: centralized remember-across-conversations effective-default resolver.
+      8156,
       env,
     ),
     publicFunctionExports: readPluginSdkSurfaceBudgetEnv(
@@ -305,7 +306,8 @@ export function readPluginSdkSurfaceBudgets(env = process.env) {
       // +1: async memory prompt preparation registration.
       // +3: gateway-backed harness question runner and claim/cancel helpers.
       // Harvest: internal question runtime callable -1.
-      4537,
+      // +1: centralized remember-across-conversations effective-default resolver.
+      4538,
       env,
     ),
     publicDeprecatedExports: readPluginSdkSurfaceBudgetEnv(

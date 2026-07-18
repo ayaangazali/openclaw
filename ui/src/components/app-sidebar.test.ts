@@ -81,11 +81,12 @@ function createGatewayHarness(client: GatewayBrowserClient) {
   };
   const listeners = new Set<(next: ApplicationGatewaySnapshot) => void>();
   const eventListeners = new Set<(event: { event: string; payload: unknown }) => void>();
+  const setSessionKey = vi.fn();
   const gateway = {
     get snapshot() {
       return snapshot;
     },
-    setSessionKey: () => undefined,
+    setSessionKey,
     subscribe(listener: (next: ApplicationGatewaySnapshot) => void) {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -97,6 +98,7 @@ function createGatewayHarness(client: GatewayBrowserClient) {
   } as unknown as ApplicationGateway;
   return {
     gateway,
+    setSessionKey,
     publish(patch: Partial<ApplicationGatewaySnapshot>) {
       snapshot = { ...snapshot, ...patch };
       for (const listener of listeners) {
@@ -366,6 +368,21 @@ describe("AppSidebar brand actions", () => {
 
     button?.click();
     expect(onOpenNewSession).toHaveBeenCalledExactlyOnceWith("research");
+  });
+
+  it("opens the archived Sessions view from the sessions-zone footer", async () => {
+    const gateway = createGateway({} as GatewayBrowserClient);
+    const { sidebar } = await mountSidebar(
+      gateway,
+      createSessions("main", ["agent:main:main", "agent:main:work"]),
+    );
+    const onNavigate = vi.fn();
+    sidebar.onNavigate = onNavigate;
+    await sidebar.updateComplete;
+
+    sidebar.querySelector<HTMLButtonElement>(".sidebar-view-archived")?.click();
+
+    expect(onNavigate).toHaveBeenCalledWith("sessions", { search: "?showArchived=1" });
   });
 });
 
@@ -3546,6 +3563,55 @@ describe("AppSidebar session mutation feedback", () => {
     }
     link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, metaKey: true }));
   }
+
+  async function mountToastHost() {
+    const host = document.createElement("openclaw-toast-host");
+    document.body.append(host);
+    await host.updateComplete;
+    return host;
+  }
+
+  it("offers undo after archiving and restores a pinned active session", async () => {
+    const { gateway, harness, sidebar } = await mountMutationHarness();
+    const state = createSessionState("main", ["agent:main:main", "agent:main:a", "agent:main:b"]);
+    const archivedRow = state.result?.sessions.find((row) => row.key === "agent:main:a");
+    if (!archivedRow) {
+      throw new Error("expected archive row");
+    }
+    archivedRow.pinned = true;
+    harness.publishList({ result: state.result, agentId: state.agentId });
+    gateway.publish({ sessionKey: archivedRow.key });
+    sidebar.sessionKey = archivedRow.key;
+    (sidebar as unknown as { activeRouteId: string }).activeRouteId = "chat";
+    const navigate = vi.fn();
+    sidebar.onNavigate = navigate;
+    const toast = await mountToastHost();
+    await sidebar.updateComplete;
+
+    const menu = await openSessionMenu(sidebar, archivedRow.key);
+    menu.querySelector<HTMLButtonElement>('[data-shortcut="a"]')?.click();
+    await vi.waitFor(() => expect(harness.patch).toHaveBeenCalledOnce());
+    await vi.waitFor(() =>
+      expect(toast.querySelector(".app-toast__message")?.textContent).toBe("Session archived"),
+    );
+    expect(harness.patch).toHaveBeenCalledWith(
+      archivedRow.key,
+      { archived: true },
+      { agentId: "main" },
+    );
+    toast.querySelector<HTMLButtonElement>(".app-toast__action")?.click();
+
+    await vi.waitFor(() => expect(harness.patch).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(gateway.setSessionKey).toHaveBeenLastCalledWith(archivedRow.key));
+    expect(harness.patch).toHaveBeenLastCalledWith(
+      archivedRow.key,
+      { archived: false, pinned: true },
+      { agentId: "main" },
+    );
+    expect(navigate).toHaveBeenLastCalledWith("chat", {
+      search: "?session=agent%3Amain%3Aa",
+    });
+  });
 
   it("reconciles and stops an idle active cloud worker through its session", async () => {
     const request = vi.fn(() => Promise.resolve({ ok: true }));

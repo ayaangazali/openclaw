@@ -117,6 +117,8 @@ export interface CreateAgentSessionOptions {
   sessionStartEvent?: SessionStartEvent;
   /** Optional lock used before session-file writes or write-capable extension hooks. */
   withSessionWriteLock?: AgentSessionWriteLockRunner;
+  /** Owner of reactive context-overflow recovery. Defaults to the session. */
+  contextOverflowRecoveryOwner?: "session" | "caller";
 }
 
 /** Result from createAgentSession */
@@ -536,6 +538,7 @@ export async function createAgentSession(
     extensionRunnerRef,
     sessionStartEvent: options.sessionStartEvent,
     withSessionWriteLock: options.withSessionWriteLock,
+    contextOverflowRecoveryOwner: options.contextOverflowRecoveryOwner,
   });
   const extensionsResult = resourceLoader.getExtensions();
 

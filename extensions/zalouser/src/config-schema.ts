@@ -1,5 +1,6 @@
 // Zalouser helper module supports config schema behavior.
 import {
+  DmConfigSchema,
   AllowFromListSchema,
   buildMultiAccountChannelSchema,
   DmPolicySchema,
@@ -22,6 +23,7 @@ const zalouserAccountSchema = z.object({
   dangerouslyAllowNameMatching: z.boolean().optional(),
   dmPolicy: DmPolicySchema.optional(),
   dmHistoryLimit: z.number().int().min(0).optional(),
+  dms: z.record(z.string(), DmConfigSchema.optional()).optional(),
   allowFrom: AllowFromListSchema,
   historyLimit: z.number().int().min(0).optional(),
   groupAllowFrom: AllowFromListSchema,

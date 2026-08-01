@@ -41,14 +41,14 @@ describe("channel dmHistoryLimit contract", () => {
     expect(rejectsKey(asSchema(entry?.schema), "dmHistoryLimit")).toBe(false);
   });
 
-  it.each(dmCapableChannels)(
-    "%s accepts channels.<id>.accounts.<account>.dmHistoryLimit",
-    (channelId) => {
-      const entry = GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA.find(
-        (candidate) => candidate.channelId === channelId,
-      );
-      const accounts = asSchema(asSchema(entry?.schema)?.properties?.accounts);
-      expect(rejectsKey(asSchema(accounts?.additionalProperties), "dmHistoryLimit")).toBe(false);
-    },
-  );
+  // The same doc sentence covers the per-DM override, and the resolver reads
+  // dms.<id>.historyLimit before falling back to dmHistoryLimit.
+  it.each(dmCapableChannels)("%s accepts channels.<id>.dms.<id>.historyLimit", (channelId) => {
+    const entry = GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA.find(
+      (candidate) => candidate.channelId === channelId,
+    );
+    expect(rejectsKey(asSchema(entry?.schema), "dms")).toBe(false);
+    const dms = asSchema(asSchema(entry?.schema)?.properties?.dms);
+    expect(rejectsKey(asSchema(dms?.additionalProperties), "historyLimit")).toBe(false);
+  });
 });

@@ -375,12 +375,12 @@ channels:
 
 ### Common patterns
 
-| Goal                                     | Config                                                                                   |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------- |
-| Default behavior (silent OKs, alerts on) | _(no config needed)_                                                                     |
-| Fully silent (no messages, no indicator) | `channels.defaults.heartbeat: { showOk: false, showAlerts: false, useIndicator: false }` |
-| Indicator-only (no messages)             | `channels.defaults.heartbeat: { showOk: false, showAlerts: false, useIndicator: true }`  |
-| OKs in one channel only                  | `channels.telegram.heartbeat: { showOk: true }`                                          |
+| Goal                                     | Config                                                                                             |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Default behavior (silent OKs, alerts on) | _(no config needed)_                                                                               |
+| Fully silent (no messages, no indicator) | `channels.defaults.heartbeatVisibility: { showOk: false, showAlerts: false, useIndicator: false }` |
+| Indicator-only (no messages)             | `channels.defaults.heartbeatVisibility: { showOk: false, showAlerts: false, useIndicator: true }`  |
+| OKs in one channel only                  | `channels.telegram.heartbeatVisibility: { showOk: true }`                                          |
 
 ## Monitor scratch (optional)
 

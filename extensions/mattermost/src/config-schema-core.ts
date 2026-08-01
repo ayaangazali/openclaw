@@ -141,6 +141,7 @@ const MattermostAccountSchemaBase = z
     requireMention: z.boolean().optional(),
     implicitMentions: ChannelImplicitMentionsSchema.optional(),
     dmPolicy: DmPolicySchema.optional().default("pairing"),
+    dmHistoryLimit: z.number().int().min(0).optional(),
     allowFrom: z.array(z.union([z.string(), z.number()])).optional(),
     groupAllowFrom: z.array(z.union([z.string(), z.number()])).optional(),
     groupPolicy: GroupPolicySchema.optional().default("allowlist"),

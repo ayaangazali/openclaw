@@ -26,6 +26,7 @@ const SmsAccountConfigSchema = z
     publicWebhookUrl: z.string().optional(),
     dangerouslyDisableSignatureValidation: z.boolean().optional(),
     dmPolicy: DmPolicySchema.optional().default("pairing"),
+    dmHistoryLimit: z.number().int().min(0).optional(),
     allowFrom: AllowFromListSchema,
     textChunkLimit: z.number().int().positive().optional(),
   })

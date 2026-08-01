@@ -31,6 +31,7 @@ const LineCommonConfigSchemaBase = z.object({
   allowFrom: z.array(z.union([z.string(), z.number()])).optional(),
   groupAllowFrom: z.array(z.union([z.string(), z.number()])).optional(),
   dmPolicy: DmPolicySchema.optional().default("pairing"),
+  dmHistoryLimit: z.number().int().min(0).optional(),
   groupPolicy: GroupPolicySchema.optional().default("allowlist"),
   responsePrefix: z.string().optional(),
   mediaMaxMb: z.number().optional(),

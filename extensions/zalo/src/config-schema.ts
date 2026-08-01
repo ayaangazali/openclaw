@@ -20,6 +20,7 @@ const zaloAccountSchema = z.object({
   webhookSecret: buildSecretInputSchema().optional(),
   webhookPath: z.string().optional(),
   dmPolicy: DmPolicySchema.optional(),
+  dmHistoryLimit: z.number().int().min(0).optional(),
   allowFrom: AllowFromListSchema,
   groupPolicy: GroupPolicySchema.optional(),
   groupAllowFrom: AllowFromListSchema,

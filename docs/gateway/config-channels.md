@@ -91,7 +91,7 @@ Use `channels.defaults` for shared group-policy, implicit-mention, and heartbeat
         quotedBot: true,
         threadParticipation: true,
       },
-      heartbeat: {
+      heartbeatVisibility: {
         showOk: false,
         showAlerts: true,
         useIndicator: true,

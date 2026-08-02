@@ -206,6 +206,7 @@ const FeishuSharedConfigShape = {
   markdown: MarkdownConfigSchema,
   configWrites: z.boolean().optional(),
   replyToMode: ReplyToModeSchema.optional(),
+  responsePrefix: z.string().optional(),
   dmPolicy: DmPolicySchema.optional(),
   allowFrom: z.array(z.union([z.string(), z.number()])).optional(),
   groupPolicy: FeishuGroupPolicySchema.optional(),

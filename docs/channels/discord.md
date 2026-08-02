@@ -1172,22 +1172,6 @@ OpenClaw uses Discord components v2 for exec approvals and cross-context markers
 - `embeds` are ignored when components v2 are present.
 - Plain URL previews are suppressed by default. Set `suppressEmbeds: false` on a message action when a single outbound link should expand.
 
-Example:
-
-```json5
-{
-  channels: {
-    discord: {
-      ui: {
-        components: {
-          accentColor: "#5865F2",
-        },
-      },
-    },
-  },
-}
-```
-
 ## Voice
 
 Discord has two distinct voice surfaces: realtime **voice channels** (continuous conversations) and **voice message attachments** (the waveform preview format). The gateway supports both.

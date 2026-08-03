@@ -2,6 +2,7 @@
 import {
   DmPolicySchema,
   GroupPolicySchema,
+  MentionPatternsPolicySchema,
   buildChannelConfigSchema,
   buildGroupEntrySchema,
   buildMultiAccountChannelSchema,
@@ -23,6 +24,7 @@ const ThreadBindingsSchema = z
 const LineCommonConfigSchemaBase = z.object({
   enabled: z.boolean().optional(),
   configWrites: z.boolean().optional(),
+  mentionPatterns: MentionPatternsPolicySchema.optional(),
   channelAccessToken: z.string().optional(),
   channelSecret: z.string().optional(),
   tokenFile: z.string().optional(),

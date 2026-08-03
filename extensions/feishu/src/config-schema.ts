@@ -3,6 +3,7 @@ import { normalizeAccountId } from "openclaw/plugin-sdk/account-id";
 import {
   DmPolicySchema,
   GroupPolicySchema,
+  MentionPatternsPolicySchema,
   buildChannelConfigSchema,
   buildGroupEntrySchema,
   buildMultiAccountChannelSchema,
@@ -197,6 +198,7 @@ const FeishuSharedConfigShape = {
   capabilities: z.array(z.string()).optional(),
   markdown: MarkdownConfigSchema,
   configWrites: z.boolean().optional(),
+  mentionPatterns: MentionPatternsPolicySchema.optional(),
   dmPolicy: DmPolicySchema.optional(),
   allowFrom: z.array(z.union([z.string(), z.number()])).optional(),
   groupPolicy: FeishuGroupPolicySchema.optional(),

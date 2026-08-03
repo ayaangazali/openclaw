@@ -1,5 +1,6 @@
 // Qa Channel helper module supports config schema behavior.
 import {
+  MentionPatternsPolicySchema,
   buildChannelConfigSchema,
   buildGroupEntrySchema,
   buildMultiAccountChannelSchema,
@@ -27,6 +28,7 @@ const QaChannelAccountConfigSchema = z
     name: z.string().optional(),
     enabled: z.boolean().optional(),
     configWrites: z.boolean().optional(),
+    mentionPatterns: MentionPatternsPolicySchema.optional(),
     baseUrl: z.string().url().optional(),
     botUserId: z.string().optional(),
     botDisplayName: z.string().optional(),

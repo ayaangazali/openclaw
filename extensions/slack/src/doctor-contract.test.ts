@@ -1,3 +1,4 @@
+import { expectDefined } from "@openclaw/normalization-core";
 import { describe, expect, it } from "vitest";
 import { legacyConfigRules, normalizeCompatibilityConfig } from "./doctor-contract.js";
 
@@ -92,10 +93,13 @@ describe("retired Socket Mode transport tuning", () => {
       } as never,
     });
 
-    const slack = (result.config.channels as Record<string, Record<string, unknown>>).slack;
+    const slack = expectDefined(
+      (result.config.channels as Record<string, Record<string, unknown> | undefined>).slack,
+      "channels.slack",
+    );
     expect(slack.socketMode).toBeUndefined();
     expect(slack.mode).toBe("socket");
-    const accounts = slack.accounts as Record<string, Record<string, unknown>>;
+    const accounts = slack.accounts as Record<string, Record<string, unknown> | undefined>;
     expect(accounts.ops?.socketMode).toBeUndefined();
     expect(result.changes.some((change) => change.includes("socketMode"))).toBe(true);
   });

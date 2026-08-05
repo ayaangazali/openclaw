@@ -810,7 +810,7 @@ OpenClaw sets the Slack SDK client pong timeout to 15 seconds for Socket Mode. T
 
 Notes:
 
-- The `channels.slack.socketMode` object, including `clientPingTimeout`, `serverPingTimeout`, and `pingPongLoggingEnabled`, is retired. Slack config validation rejects it at both `channels.slack.socketMode` and `channels.slack.accounts.<accountId>.socketMode`. Run `openclaw doctor --fix` to strip it from an existing config.
+- The `channels.slack.socketMode` object, including `clientPingTimeout`, `serverPingTimeout`, and `pingPongLoggingEnabled`, is retired and is no longer read at runtime. `openclaw doctor` reports it at both `channels.slack.socketMode` and `channels.slack.accounts.<accountId>.socketMode`, and `openclaw doctor --fix` removes it.
 - App messages and events remain application state, not transport liveness signals.
 - Socket Mode restart backoff starts around 2 seconds and caps around 30 seconds. Recoverable start, start-wait, and disconnect failures retry until the channel stops. Permanent account and credential errors such as invalid auth, revoked tokens, or missing scopes fail fast instead of retrying forever.
 

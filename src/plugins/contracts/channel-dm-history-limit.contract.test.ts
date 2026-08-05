@@ -25,8 +25,18 @@ function rejectsKey(schema: JsonSchemaLike | undefined, key: string): boolean {
  * sessions, "not just a fixed list", so every channel exposing a DM policy has
  * to accept the key. Channels without a DM surface are out of scope.
  */
-const dmCapableChannels = GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA.filter((entry) =>
-  Object.hasOwn(asSchema(entry.schema)?.properties ?? {}, "dmPolicy"),
+/**
+ * DM-capable channels that publish no dmPolicy surface. Raft and Reef declare
+ * `chatTypes: ["direct"]` and Tlon includes "direct" (`channel.ts:110` in each),
+ * and all three build `kind: "direct"` routes, so the session-key resolver
+ * applies the key for them even though there is no dmPolicy to key on.
+ */
+const DM_ROUTING_CHANNELS_WITHOUT_DM_POLICY = ["raft", "reef", "tlon"] as const;
+
+const dmCapableChannels = GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA.filter(
+  (entry) =>
+    Object.hasOwn(asSchema(entry.schema)?.properties ?? {}, "dmPolicy") ||
+    (DM_ROUTING_CHANNELS_WITHOUT_DM_POLICY as readonly string[]).includes(entry.channelId),
 ).map((entry) => entry.channelId);
 
 describe("channel dmHistoryLimit contract", () => {

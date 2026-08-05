@@ -10,7 +10,6 @@ import {
   defineKeyMoveMigration,
   hasLegacyAccountStreamingAliases,
   normalizeChannelConfigEntries,
-  stripRetiredChannelKeys,
 } from "openclaw/plugin-sdk/runtime-doctor";
 import { resolveSlackNativeStreaming, resolveSlackStreamingMode } from "./streaming-compat.js";
 
@@ -110,15 +109,6 @@ function removeInteractiveRepliesCapability(params: {
   return { entry, changed: true };
 }
 
-// Socket Mode ping/pong tuning was retired; the client pong timeout is now a
-// fixed constant in the receiver setup, so the whole object is stripped rather
-// than mapped onto a replacement key.
-const RETIRED_SOCKET_MODE_KEYS = new Set(["socketMode"]);
-
-function hasRetiredSocketMode(value: unknown): boolean {
-  return Object.hasOwn(asObjectRecord(value) ?? {}, "socketMode");
-}
-
 export const legacyConfigRules: ChannelDoctorLegacyConfigRule[] = [
   ...streamingAliasMigration.legacyConfigRules,
   {
@@ -170,18 +160,6 @@ export const legacyConfigRules: ChannelDoctorLegacyConfigRule[] = [
       'channels.slack.accounts.<id>.channels.<id>.allow is legacy; use channels.slack.accounts.<id>.channels.<id>.enabled instead. Run "openclaw doctor --fix".',
     match: (value) => hasLegacyAccountStreamingAliases(value, channelAllowMigration.hasLegacy),
   },
-  {
-    path: ["channels", "slack"],
-    message:
-      'channels.slack.socketMode is retired; the Socket Mode client pong timeout is now fixed. Run "openclaw doctor --fix".',
-    match: hasRetiredSocketMode,
-  },
-  {
-    path: ["channels", "slack", "accounts"],
-    message:
-      'channels.slack.accounts.<id>.socketMode is retired; the Socket Mode client pong timeout is now fixed. Run "openclaw doctor --fix".',
-    match: (value) => hasLegacyAccountStreamingAliases(value, hasRetiredSocketMode),
-  },
 ];
 
 function normalizeSlackEntry(params: {
@@ -209,19 +187,8 @@ export function normalizeCompatibilityConfig({
 }): ChannelDoctorConfigMutation {
   const changes: string[] = [];
   const aliases = streamingAliasMigration.normalizeChannelConfig({ cfg, changes });
-  const socketMode = stripRetiredChannelKeys({
-    cfg: aliases.config,
-    channelId: "slack",
-    keys: RETIRED_SOCKET_MODE_KEYS,
-    scope: "root-and-accounts",
-    onRemove: (removed) => {
-      changes.push(
-        `Removed ${removed.pathPrefix}.${removed.key}; Socket Mode transport tuning is retired.`,
-      );
-    },
-  });
   return normalizeChannelConfigEntries({
-    cfg: socketMode.config,
+    cfg: aliases.config,
     channelId: "slack",
     changes,
     normalizeEntry: normalizeSlackEntry,

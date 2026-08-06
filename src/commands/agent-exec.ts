@@ -12,6 +12,7 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { mergeDeep } from "../infra/deep-merge.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { parseStrictNonNegativeInteger } from "../infra/parse-finite-number.js";
+import { LEGACY_IMPLICIT_AGENT_ID } from "../routing/session-key.js";
 import { writeRuntimeJson, writeRuntimeStdout, type RuntimeEnv } from "../runtime.js";
 
 const AGENT_EXEC_MESSAGE_MAX_BYTES = 4 * 1024 * 1024;
@@ -324,7 +325,13 @@ function buildExecRunOverlay(params: {
   // A per-agent `workspace` outranks `agents.defaults`, so pinning only the
   // defaults would let an inherited entry silently run the turn against a
   // different repository. Override every configured entry as well.
-  const entries = Object.keys(params.base.agents?.entries ?? {});
+  const baseEntries = Object.keys(params.base.agents?.entries ?? {});
+  // `--isolated` and `--auth-env-only` deliberately hand us an empty base, and a
+  // rosterless config never reaches the model: resolveRunWorkspaceDir treats
+  // workspace ownership as an isolation boundary and refuses to invent an owner.
+  // Declare the implicit agent explicitly here, which is the same id
+  // listAgentIds/resolveDefaultAgentId already resolve a rosterless config to.
+  const entries = baseEntries.length > 0 ? baseEntries : [LEGACY_IMPLICIT_AGENT_ID];
   return {
     agents: {
       defaults: {
@@ -332,9 +339,7 @@ function buildExecRunOverlay(params: {
         skipBootstrap: true,
         ...(params.opts.localModelLean ? { experimental: { localModelLean: true } } : {}),
       },
-      ...(entries.length > 0
-        ? { entries: Object.fromEntries(entries.map((id) => [id, { workspace: params.cwd }])) }
-        : {}),
+      entries: Object.fromEntries(entries.map((id) => [id, { workspace: params.cwd }])),
     },
     ...(codeMode !== undefined ? { tools: { codeMode } } : {}),
   } as OpenClawConfig;

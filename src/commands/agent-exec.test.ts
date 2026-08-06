@@ -13,6 +13,7 @@ import {
   loadAuthProfileStoreForRuntime,
   resolvePersistedAuthProfileOwnerAgentDir,
 } from "../agents/auth-profiles.js";
+import { resolveRunWorkspaceDir } from "../agents/workspace-run.js";
 import { enqueueExecutionIdentityContextAtAdmission } from "../audit/execution-identity-admission.js";
 import {
   clearRuntimeConfigSnapshot,
@@ -934,6 +935,27 @@ describe("agent exec run config layering", () => {
 
     expect(config.agents?.defaults?.workspace).toBe("/run/here");
     expect(config.agents?.defaults?.skipBootstrap).toBe(true);
+  });
+
+  it("declares an explicit roster so a rosterless base can resolve a workspace", () => {
+    // --isolated and --auth-env-only hand buildExecRunConfig an empty base by
+    // design. resolveRunWorkspaceDir refuses to invent a workspace owner, so
+    // without an explicit entry the run cannot reach the model at all.
+    const config = buildExecRunConfig({ base: {}, cwd: "/run/here" });
+
+    expect(Object.keys(config.agents?.entries ?? {})).toEqual(["main"]);
+    expect(config.agents?.entries?.main?.workspace).toBe("/run/here");
+    expect(() => resolveRunWorkspaceDir({ config, workspaceDir: "/run/here" })).not.toThrow();
+  });
+
+  it("still pins every configured entry to the invocation folder", () => {
+    const config = buildExecRunConfig({
+      base: { agents: { entries: { main: { workspace: "/a" }, ops: { workspace: "/b" } } } },
+      cwd: "/run/here",
+    });
+
+    expect(Object.keys(config.agents?.entries ?? {}).toSorted()).toEqual(["main", "ops"]);
+    expect(config.agents?.entries?.ops?.workspace).toBe("/run/here");
   });
 
   it("never downgrades a configured sandbox or shell env to the exec defaults", () => {

@@ -1976,6 +1976,53 @@ describe("createBackupArchive", () => {
     );
   });
 
+  it("omits ephemeral coordinator lock databases held open by a running gateway", async () => {
+    await withOpenClawTestState(
+      {
+        layout: "state-only",
+        prefix: "openclaw-backup-coordinator-lock-",
+        scenario: "minimal",
+      },
+      async (state) => {
+        const outputDir = state.path("backups");
+        // Shapes a running gateway leaves behind: gateway-lock.ts appends
+        // `.sqlite` to `gateway.<hash>.lock`, and the device-identity
+        // coordinator uses the same `.lock.sqlite` convention.
+        const lockPaths = [
+          state.statePath("tmp", "openclaw-502", "gateway.a1b2c3d4.lock.sqlite"),
+          state.statePath("tmp", "openclaw-502", "gateway.state.e5f6a7b8.lock.sqlite"),
+          state.statePath("tmp", "device-identity.9c8d7e6f.lock.sqlite"),
+        ];
+        await fs.mkdir(outputDir, { recursive: true });
+        for (const lockPath of lockPaths) {
+          await fs.mkdir(path.dirname(lockPath), { recursive: true });
+          for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+            await fs.writeFile(`${lockPath}${suffix}`, "");
+          }
+        }
+
+        const result = await createBackupArchive({
+          output: outputDir,
+          includeWorkspace: false,
+          nowMs: Date.UTC(2026, 4, 9, 8, 34, 0),
+        });
+        const entries = await listArchiveEntries(result.archivePath);
+        for (const lockPath of lockPaths) {
+          const relativeLockPath = path
+            .relative(state.stateDir, lockPath)
+            .split(path.sep)
+            .join("/");
+          for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+            expect(
+              entries.some((entry) => entry.endsWith(`/state/${relativeLockPath}${suffix}`)),
+              `${relativeLockPath}${suffix}`,
+            ).toBe(false);
+          }
+        }
+      },
+    );
+  });
+
   it("omits transient memory reindex databases and sidecars", async () => {
     await withOpenClawTestState(
       {

@@ -376,7 +376,10 @@ type StateSqliteBackupPlan = {
 };
 
 const SQLITE_BACKUP_SOURCE_SUFFIXES = ["", "-wal", "-shm", "-journal"] as const;
-const SQLITE_BACKUP_EXCLUDED_SUFFIXES = [".reindex-lock.sqlite"] as const;
+// Exclusive-coordinator lock databases are process-lifetime scratch, not backup
+// material, and a running gateway holds them open so compaction cannot succeed.
+// `.reindex-lock.sqlite` stays listed separately: it ends in `-lock.sqlite`.
+const SQLITE_BACKUP_EXCLUDED_SUFFIXES = [".reindex-lock.sqlite", ".lock.sqlite"] as const;
 const SQLITE_BACKUP_REINDEX_TRANSIENT_PATTERN =
   /\.sqlite\.(?:backup|memory-reindex|tmp)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 

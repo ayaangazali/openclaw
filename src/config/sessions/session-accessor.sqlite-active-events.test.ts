@@ -154,6 +154,43 @@ describe("SQLite active transcript event projection", () => {
     });
   });
 
+  it("stops counting pre-reset bytes once /new drops the earlier transcript", async () => {
+    const bulk = "x".repeat(20_000);
+    await persistSessionTranscriptTurn(scope, {
+      messages: [
+        { eventId: "pre-reset", parentId: null, message: { role: "user", content: bulk } },
+      ],
+      touchSessionEntry: false,
+    });
+
+    const beforeReset = readSessionTranscriptActiveStats(scope);
+    expect(beforeReset.sizeBytes).toBeGreaterThan(20_000);
+
+    await appendTranscriptEvent(scope, {
+      type: "reset",
+      id: "reset-boundary",
+      parentId: "pre-reset",
+      timestamp: "2026-07-22T00:00:00.000Z",
+      reason: "new",
+    });
+    await persistSessionTranscriptTurn(scope, {
+      messages: [
+        {
+          eventId: "post-reset",
+          parentId: "reset-boundary",
+          message: { role: "user", content: "fresh start" },
+        },
+      ],
+      touchSessionEntry: false,
+    });
+
+    // The dropped turn is still stored, so a whole-projection sum would keep the
+    // byte fuse latched above its threshold forever after /new.
+    const afterReset = readSessionTranscriptActiveStats(scope);
+    expect(afterReset.eventCount).toBe(1);
+    expect(afterReset.sizeBytes).toBeLessThan(1_000);
+  });
+
   it("defers mixed legacy and canonical rebuilds off request stacks", async () => {
     await persistSessionTranscriptTurn(scope, {
       messages: [

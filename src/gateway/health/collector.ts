@@ -110,6 +110,8 @@ export function resolveHealthAgentOrder(cfg: OpenClawConfig) {
 export async function buildHealthSessionSummary(storePath: string, agentId?: string) {
   const { listSessionEntriesReadOnly } = await import("../../config/sessions/session-accessor.js");
   const { isTransientSqliteError } = await import("../../infra/unhandled-rejections.js");
+  const { resolveSqliteTargetFromSessionStorePath } =
+    await import("../../config/sessions/session-sqlite-target.js");
   let listed: ReturnType<typeof listSessionEntriesReadOnly>;
   try {
     listed = listSessionEntriesReadOnly({
@@ -132,8 +134,20 @@ export async function buildHealthSessionSummary(storePath: string, agentId?: str
     updatedAt: session.updatedAt || null,
     age: session.updatedAt ? Date.now() - session.updatedAt : null,
   }));
+  // storePath is the legacy JSON locator that still identifies a store; the rows
+  // above come from SQLite. Reporting the locator advertises a sessions.json that
+  // no longer exists, so report the database the entries were actually read from.
+  let resolvedPath = storePath;
+  try {
+    resolvedPath = resolveSqliteTargetFromSessionStorePath(
+      storePath,
+      agentId ? { agentId } : {},
+    ).path;
+  } catch {
+    // Health is best-effort: keep the locator rather than fail the whole summary.
+  }
   return {
-    path: storePath,
+    path: resolvedPath,
     count: sessions.length,
     recent,
   } satisfies HealthSummary["sessions"];

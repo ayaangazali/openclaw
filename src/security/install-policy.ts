@@ -267,7 +267,7 @@ async function assertSecureCommandAncestorDirs(params: {
     }
     if (process.platform === "win32" && perms.source === "unknown") {
       throw new Error(
-        `${params.label} parent directory ACL verification unavailable on Windows for ${dir}. Set allowInsecurePath=true for this policy to bypass this check when the path is trusted.`,
+        `${params.label} parent directory ACL verification unavailable on Windows for ${dir}. Point the policy command at a directory whose ACLs can be verified.`,
       );
     }
   }
@@ -277,7 +277,6 @@ async function assertSecureCommandPath(params: {
   targetPath: string;
   label: string;
   trustedDirs?: string[];
-  allowInsecurePath?: boolean;
   allowSymlinkPath?: boolean;
 }): Promise<string> {
   if (!isAbsolutePathname(params.targetPath)) {
@@ -311,10 +310,6 @@ async function assertSecureCommandPath(params: {
       throw new Error(`${params.label} is outside trustedDirs: ${effectivePath}`);
     }
   }
-  if (params.allowInsecurePath) {
-    return effectivePath;
-  }
-
   const perms = await inspectPathPermissions(effectivePath);
   if (!perms.ok) {
     throw new Error(`${params.label} permissions could not be verified: ${effectivePath}`);
@@ -326,7 +321,7 @@ async function assertSecureCommandPath(params: {
 
   if (process.platform === "win32" && perms.source === "unknown") {
     throw new Error(
-      `${params.label} ACL verification unavailable on Windows for ${effectivePath}. Set allowInsecurePath=true for this policy to bypass this check when the path is trusted.`,
+      `${params.label} ACL verification unavailable on Windows for ${effectivePath}. Point the policy command at a path whose ACLs can be verified.`,
     );
   }
 
@@ -345,7 +340,6 @@ async function assertSecurePolicyScriptArg(params: {
   command: string;
   args: string[];
   trustedDirs?: string[];
-  allowInsecurePath?: boolean;
   allowSymlinkPath?: boolean;
 }): Promise<void> {
   const scriptArg = resolvePolicyScriptArg({ command: params.command, args: params.args });
@@ -360,7 +354,6 @@ async function assertSecurePolicyScriptArg(params: {
       targetPath: script.path,
       label: `security.installPolicy.exec.args[${script.index}]`,
       trustedDirs: params.trustedDirs,
-      allowInsecurePath: params.allowInsecurePath,
       allowSymlinkPath: false,
     });
   }
@@ -746,4 +739,3 @@ export async function probeInstallPolicy(params: {
     },
   });
 }
-/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

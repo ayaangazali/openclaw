@@ -1,9 +1,10 @@
-// Covers install-policy checks for packages and plugin installs.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+// Covers install-policy checks for packages and plugin installs.
+import { validateConfigObjectRaw } from "../config/validation.js";
 import {
   killPidIfAlive,
   readPidFile,
@@ -690,4 +691,20 @@ describe("runInstallPolicy", () => {
       );
     },
   );
+});
+
+describe("retired install-policy bypass keys", () => {
+  it("rejects the retired bypass keys in config validation", () => {
+    for (const key of ["allowInsecurePath", "allowSymlinkCommand"]) {
+      const result = validateConfigObjectRaw(
+        {
+          security: {
+            installPolicy: { exec: { source: "exec", command: "/bin/echo", [key]: true } },
+          },
+        },
+        { validateBundledChannels: true },
+      );
+      expect(result.ok, key).toBe(false);
+    }
+  });
 });

@@ -191,6 +191,45 @@ describe("SQLite active transcript event projection", () => {
     expect(afterReset.sizeBytes).toBeLessThan(1_000);
   });
 
+  it("excludes discarded tool results from the retained pre-reset window", async () => {
+    await persistSessionTranscriptTurn(scope, {
+      messages: [
+        { eventId: "old", parentId: null, message: { role: "user", content: "old" } },
+        {
+          eventId: "kept-user",
+          parentId: "old",
+          message: { role: "user", content: "kept question" },
+        },
+        {
+          eventId: "kept-tool",
+          parentId: "kept-user",
+          message: { role: "toolResult", content: `hidden tool ${"x".repeat(20_000)}` },
+        },
+        {
+          eventId: "kept-assistant",
+          parentId: "kept-tool",
+          message: { role: "assistant", content: "kept answer" },
+        },
+      ],
+      touchSessionEntry: false,
+    });
+    await appendTranscriptEvent(scope, {
+      type: "reset",
+      id: "reset-boundary",
+      parentId: "kept-assistant",
+      timestamp: "2026-07-22T00:00:00.000Z",
+      reason: "new",
+      firstKeptEntryId: "kept-user",
+    });
+
+    // The reset retains kept-user and kept-assistant only; kept-tool is hidden from the
+    // next turn, so its bytes must not keep the byte fuse latched.
+    expect(readSessionTranscriptMessageEventById(scope, "kept-tool")).toBeUndefined();
+    const stats = readSessionTranscriptActiveStats(scope);
+    expect(stats.eventCount).toBe(2);
+    expect(stats.sizeBytes).toBeLessThan(1_000);
+  });
+
   it("defers mixed legacy and canonical rebuilds off request stacks", async () => {
     await persistSessionTranscriptTurn(scope, {
       messages: [

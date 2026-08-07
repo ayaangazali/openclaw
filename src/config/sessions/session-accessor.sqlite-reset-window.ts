@@ -44,8 +44,6 @@ type ResetMessageWindow = {
   postBoundaryMessagePosition: number;
   /** Active position of the reset row; events at or before it are pre-boundary. */
   boundaryActivePosition: number;
-  /** Start of the retained span before the boundary, when firstKeptEntryId applies. */
-  keptFromActivePosition: number | undefined;
 };
 
 type ResetMessageWindowCacheEntry = {
@@ -171,7 +169,6 @@ function findLatestResetMessageWindow(
         .limit(1),
     )?.message_position ?? projection.state.activeMessageCount;
   let keptMessagePositions: number[] = [];
-  let keptFromActivePosition: number | undefined;
   if (typeof reset.firstKeptEntryId === "string") {
     const firstKept = executeSqliteQueryTakeFirstSync(
       projection.database.db,
@@ -187,7 +184,6 @@ function findLatestResetMessageWindow(
         .where("identity.event_id", "=", reset.firstKeptEntryId),
     );
     if (firstKept && firstKept.active_position < resetRow.active_position) {
-      keptFromActivePosition = firstKept.active_position;
       keptMessagePositions = executeSqliteQuerySync(
         projection.database.db,
         db
@@ -223,7 +219,6 @@ function findLatestResetMessageWindow(
     keptMessagePositions,
     postBoundaryMessagePosition,
     boundaryActivePosition: resetRow.active_position,
-    keptFromActivePosition,
   };
 }
 
@@ -342,16 +337,18 @@ export function readVisibleTranscriptByteStats(projection: ResetWindowProjection
     window
       ? base.where((eb) => {
           const afterBoundary = eb("active.active_position", ">", window.boundaryActivePosition);
-          const keptFrom = window.keptFromActivePosition;
-          if (keptFrom === undefined) {
+          const keptMessagePositions = window.keptMessagePositions;
+          if (keptMessagePositions.length === 0) {
             return afterBoundary;
           }
-          // Retained pre-boundary span stays visible, so its bytes still count.
+          // A reset retains only the user/assistant messages named by the window, so
+          // count those exact rows rather than the whole pre-boundary span. Including
+          // the span would keep discarded tool results on the byte fuse after `/new`.
           return eb.or([
             afterBoundary,
             eb.and([
-              eb("active.active_position", ">=", keptFrom),
               eb("active.active_position", "<", window.boundaryActivePosition),
+              eb("active.message_position", "in", keptMessagePositions),
             ]),
           ]);
         })

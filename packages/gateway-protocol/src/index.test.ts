@@ -21,12 +21,14 @@ import {
   validateSessionsCompanionStateParams,
   validateSessionsCreateParams,
   validateSessionsObserverVisibilityParams,
+  validateSessionsArchiveManyParams,
   validateSessionsPatchParams,
   validateSessionsSearchParams,
   validateSessionsSendParams,
   validateSessionsUsageParams,
   validateTasksCancelParams,
   validateTasksListParams,
+  validateTasksRecoveryParams,
   validateTalkConfigResult,
   validateTalkClientCreateParams,
   validateTalkClientSteerParams,
@@ -194,6 +196,40 @@ describe("lazy protocol validators", () => {
     expectRejected(validateSessionsPatchParams, [
       sessionPatch({ key: "agent:main:self-archive", expectedSessionId: "" }),
       sessionPatch({ key: "agent:main:self-archive", expectedLifecycleRevision: "" }),
+    ]);
+  });
+
+  it("validates bounded closed bulk session archive requests", () => {
+    const target = {
+      key: "agent:main:archive-me",
+      agentId: "main",
+      expectedSessionId: "session-archive-me",
+      expectedLifecycleRevision: "revision-archive-me",
+    };
+    expectAccepted(validateSessionsArchiveManyParams, [
+      { targets: [target], archived: true },
+      {
+        targets: Array.from({ length: 100 }, (_, index) => ({
+          key: `agent:main:archive-${index}`,
+        })),
+        archived: false,
+      },
+    ]);
+    expectRejected(validateSessionsArchiveManyParams, [
+      { targets: [], archived: true },
+      {
+        targets: Array.from({ length: 101 }, (_, index) => ({
+          key: `agent:main:archive-${index}`,
+        })),
+        archived: true,
+      },
+      { targets: [{ key: "" }], archived: true },
+      { targets: [{ key: target.key, agentId: "" }], archived: true },
+      { targets: [{ key: target.key, expectedSessionId: "" }], archived: true },
+      { targets: [{ key: target.key, expectedLifecycleRevision: "" }], archived: true },
+      { targets: [{ key: target.key, extra: true }], archived: true },
+      { targets: [target], archived: "yes" },
+      { targets: [target], archived: true, extra: true },
     ]);
   });
 
@@ -908,6 +944,17 @@ describe("validateTasksListParams", () => {
   it("rejects internal task statuses and unknown fields", () => {
     expectRejected(validateTasksListParams, [{ status: "succeeded" }]);
     expectRejected(validateTasksCancelParams, [{ taskId: "task-1", force: true }]);
+  });
+});
+
+describe("validateTasksRecoveryParams", () => {
+  it("accepts one to ten task ids and rejects unbounded recovery batches", () => {
+    expectAccepted(validateTasksRecoveryParams, [{ taskIds: ["task-1", "task-2"] }]);
+    expectRejected(validateTasksRecoveryParams, [
+      { taskIds: [] },
+      { taskIds: Array.from({ length: 11 }, (_, index) => `task-${index}`) },
+      { taskIds: ["task-1"], force: true },
+    ]);
   });
 });
 

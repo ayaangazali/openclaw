@@ -14,6 +14,7 @@ import {
   resolveResponsesTerminalStopReason,
 } from "../providers/openai-responses-terminal-usage.js";
 import type {
+  AssistantMessage,
   AssistantMessageEvent,
   Model,
   TextContent,
@@ -27,7 +28,10 @@ import {
   OPENAI_RESPONSES_REASONING_REPLAY_BLOCK_META_KEY,
   type OpenAIResponsesReasoningReplayMetadata,
 } from "./openai-responses-contracts.js";
-import { encodeTextSignatureV1 } from "./openai-responses-replay-internal.js";
+import {
+  captureOpenAIResponsesCompaction,
+  encodeTextSignatureV1,
+} from "./openai-responses-replay-internal.js";
 
 export type ResponsesEventSink = { push(event: AssistantMessageEvent): void };
 export type TextBlockReference = {
@@ -41,8 +45,10 @@ export type ResponsesThinkingBlock = ThinkingContent & {
 
 type TerminalOutput = {
   content: Array<TextContent | ThinkingContent | ToolCall>;
+  providerReplay?: AssistantMessage["providerReplay"];
   usage: Usage & { reasoningTokens?: number };
   stopReason: string;
+  responseModel?: string;
   responseId?: string;
   errorMessage?: string;
 };
@@ -80,12 +86,15 @@ export function resolveResponsesToolCallId(
   return resolvedItemId ? `${generated}|${resolvedItemId}` : generated;
 }
 
-export function resolveCompletedToolCallName(
-  toolCall: { block: { name: string } } | undefined,
-  value: unknown,
-): string {
-  const streamedName = toolCall?.block.name.trim() || undefined;
-  const completedName = typeof value === "string" ? value.trim() || undefined : undefined;
+export function resolveCompletedResponsesToolCall(
+  item: Extract<ResponseOutputItem, { type: "function_call" }>,
+  streamed?: { name?: string; arguments?: string },
+): Pick<ToolCall, "name" | "arguments"> {
+  if (item.status && item.status !== "completed") {
+    throw new Error("Responses stream completed with an incomplete terminal tool call");
+  }
+  const streamedName = streamed?.name?.trim() || undefined;
+  const completedName = typeof item.name === "string" ? item.name.trim() || undefined : undefined;
   if (streamedName && completedName && streamedName !== completedName) {
     throw new Error(
       `Responses stream changed tool-call function name from ${streamedName} to ${completedName}`,
@@ -95,7 +104,13 @@ export function resolveCompletedToolCallName(
   if (!name) {
     throw new Error("Responses stream completed tool call without a function name");
   }
-  return name;
+  const argumentsValue = parseJsonObjectPreservingUnsafeIntegers(
+    streamed?.arguments ?? item.arguments,
+  );
+  if (!argumentsValue) {
+    throw new Error("Responses stream completed tool call with invalid JSON arguments");
+  }
+  return { name, arguments: argumentsValue };
 }
 
 export function createResponsesTerminalController(params: {
@@ -104,8 +119,11 @@ export function createResponsesTerminalController(params: {
   model: Model;
   options?: TerminalOptions;
   reasoningBlocksById: Map<string, ResponsesThinkingBlock>;
-  completedOutputItemIdentities: Set<string>;
   startedTextBlocksByItemId: Map<string, TextBlockReference>;
+  outputItemContentIndexes: {
+    get: (item: ResponseOutputItem) => number | undefined;
+    set: (item: ResponseOutputItem, contentIndex: number) => void;
+  };
   getLastTextBlock: () => TextBlockReference | null;
   setLastTextBlock: (block: TextBlockReference | null) => void;
   markFinalized: () => void;
@@ -133,7 +151,7 @@ export function createResponsesTerminalController(params: {
       }
     }
   };
-  const appendText = (item: ResponseOutputMessage) => {
+  const appendText = (item: ResponseOutputMessage): number | undefined => {
     const text = (Array.isArray(item.content) ? item.content : [])
       .map((part) => {
         const content = part as { type: string; text?: string; refusal?: string };
@@ -144,7 +162,7 @@ export function createResponsesTerminalController(params: {
       .join("");
     const started = params.startedTextBlocksByItemId.get(item.id);
     if (!text && !started) {
-      return;
+      return undefined;
     }
     const phase = item.phase ?? undefined;
     if (started) {
@@ -165,7 +183,7 @@ export function createResponsesTerminalController(params: {
         content: text,
         partial: output as never,
       });
-      return;
+      return started.index;
     }
     const previous = params.getLastTextBlock();
     const collapse = resolveResponsesMessageSnapshotCollapse({
@@ -182,7 +200,7 @@ export function createResponsesTerminalController(params: {
         content: collapse.text,
         partial: output as never,
       });
-      return;
+      return previous.index;
     }
     const block: TextContent = {
       type: "text",
@@ -194,22 +212,10 @@ export function createResponsesTerminalController(params: {
     params.setLastTextBlock({ block, index, phase });
     stream.push({ type: "text_start", contentIndex: index, partial: output as never });
     stream.push({ type: "text_end", contentIndex: index, content: text, partial: output as never });
+    return index;
   };
-  const validateCompletedToolCall = (
-    item: Extract<ResponseOutputItem, { type: "function_call" }>,
-  ) => {
-    if (item.status && item.status !== "completed") {
-      throw new Error("Responses stream completed with an incomplete terminal tool call");
-    }
-    const name = resolveCompletedToolCallName(undefined, item.name);
-    const argumentsValue = parseJsonObjectPreservingUnsafeIntegers(item.arguments);
-    if (!argumentsValue) {
-      throw new Error("Responses stream completed tool call with invalid JSON arguments");
-    }
-    return { name, arguments: argumentsValue };
-  };
-  const appendToolCall = (item: Extract<ResponseOutputItem, { type: "function_call" }>) => {
-    const validated = validateCompletedToolCall(item);
+  const appendToolCall = (item: Extract<ResponseOutputItem, { type: "function_call" }>): number => {
+    const validated = resolveCompletedResponsesToolCall(item);
     const toolCall: ToolCall = {
       type: "toolCall",
       id: resolveResponsesToolCallId(item),
@@ -220,22 +226,21 @@ export function createResponsesTerminalController(params: {
     const contentIndex = blocks.length - 1;
     stream.push({ type: "toolcall_start", contentIndex, partial: output as never });
     stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output as never });
+    return contentIndex;
   };
   const recoverTerminalOutput = (items: ResponseOutputItem[], includeToolCalls: boolean) => {
     let hasCompletedLaterOutput = false;
     for (const item of items.toReversed()) {
       if (item.type === "reasoning") {
         // Terminal snapshots only backfill streamed reasoning; missing reasoning is never emitted.
-        hasCompletedLaterOutput ||= params.reasoningBlocksById.has(item.id);
+        hasCompletedLaterOutput ||= params.outputItemContentIndexes.get(item) !== undefined;
         continue;
       }
       if (item.type !== "message" && item.type !== "function_call") {
         continue;
       }
-      const identity =
-        item.type === "message" ? `message:${item.id}` : `function_call:${item.call_id}`;
       if (
-        params.completedOutputItemIdentities.has(identity) ||
+        params.outputItemContentIndexes.get(item) !== undefined ||
         (item.type === "message" && params.startedTextBlocksByItemId.has(item.id))
       ) {
         hasCompletedLaterOutput = true;
@@ -249,26 +254,42 @@ export function createResponsesTerminalController(params: {
         throw new Error("Responses stream omitted an output item before completed output");
       }
       if (item.type === "function_call") {
-        validateCompletedToolCall(item);
+        resolveCompletedResponsesToolCall(item);
       }
     }
-    for (const item of items) {
+    for (const [terminalIndex, item] of items.entries()) {
       if (item.type === "message") {
-        const identity = `message:${item.id}`;
-        if (params.completedOutputItemIdentities.has(identity)) {
+        const contentIndex = params.outputItemContentIndexes.get(item);
+        if (contentIndex !== undefined && !params.startedTextBlocksByItemId.has(item.id)) {
           continue;
         }
-        appendText(item);
-        params.completedOutputItemIdentities.add(identity);
+        const appendedIndex = appendText(item);
+        if (appendedIndex !== undefined) {
+          params.outputItemContentIndexes.set(item, appendedIndex);
+        }
       } else {
         params.setLastTextBlock(null);
-        if (includeToolCalls && item.type === "function_call") {
-          const identity = `function_call:${item.call_id}`;
-          if (params.completedOutputItemIdentities.has(identity)) {
+        if (item.type === "compaction" && output.providerReplay?.id !== item.id) {
+          let replayIndex = blocks.length;
+          for (const laterItem of items.slice(terminalIndex + 1)) {
+            const laterContentIndex = params.outputItemContentIndexes.get(laterItem);
+            if (laterContentIndex !== undefined) {
+              replayIndex = laterContentIndex;
+              break;
+            }
+          }
+          captureOpenAIResponsesCompaction(
+            output,
+            item,
+            replayIndex,
+            model,
+            options?.reasoningReplayMetadata,
+          );
+        } else if (includeToolCalls && item.type === "function_call") {
+          if (params.outputItemContentIndexes.get(item) !== undefined) {
             continue;
           }
-          appendToolCall(item);
-          params.completedOutputItemIdentities.add(identity);
+          params.outputItemContentIndexes.set(item, appendToolCall(item));
         }
       }
     }
@@ -283,6 +304,7 @@ export function createResponsesTerminalController(params: {
     params.markFinalized();
     backfillReasoning(response.output ?? []);
     output.responseId = response.id || output.responseId;
+    output.responseModel = response.model?.trim() || undefined;
     const usage = mapResponsesTerminalUsage(response.usage);
     const reasoningTokens = readResponsesReasoningTokens(response.usage);
     if (usage) {

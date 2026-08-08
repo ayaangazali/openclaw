@@ -10,6 +10,7 @@ import path from "node:path";
 import { sanitizeForLog } from "../../packages/terminal-core/src/ansi.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { openRootFile } from "../infra/boundary-file-read.js";
+import { safeRealpathSync } from "../infra/boundary-path.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
@@ -29,7 +30,12 @@ const LOADED_INTERNAL_HOOK_REGISTRATIONS_KEY = Symbol.for(
 );
 const loadedHookRegistrations = resolveGlobalSingleton<
   Array<{ event: string; handler: InternalHookHandler }>
->(LOADED_INTERNAL_HOOK_REGISTRATIONS_KEY, () => []);
+>(
+  LOADED_INTERNAL_HOOK_REGISTRATIONS_KEY,
+  () => [],
+  () => resetLoadedInternalHooks(),
+  "plugin-registry",
+);
 
 function safeLogValue(value: string): string {
   return sanitizeForLog(value);
@@ -122,7 +128,7 @@ export async function loadInternalHooks(
 
     for (const entry of eligible) {
       try {
-        const hookBaseDir = resolveExistingRealpath(entry.hook.baseDir);
+        const hookBaseDir = safeRealpathSync(entry.hook.baseDir);
         if (!hookBaseDir) {
           log.error(
             `Hook '${safeLogValue(entry.hook.name)}' base directory is no longer readable: ${safeLogValue(entry.hook.baseDir)}`,
@@ -220,14 +226,14 @@ export async function loadInternalHooks(
       }
       const baseDir = path.resolve(workspaceDir);
       const modulePath = path.resolve(baseDir, rawModule);
-      const baseDirReal = resolveExistingRealpath(baseDir);
+      const baseDirReal = safeRealpathSync(baseDir);
       if (!baseDirReal) {
         log.error(
           `Workspace directory is no longer readable while loading hooks: ${safeLogValue(baseDir)}`,
         );
         continue;
       }
-      const modulePathSafe = resolveExistingRealpath(modulePath);
+      const modulePathSafe = safeRealpathSync(modulePath);
       if (!modulePathSafe) {
         log.error(
           `Handler module path could not be resolved with realpath: ${safeLogValue(rawModule)}`,
@@ -297,12 +303,4 @@ export async function loadInternalHooks(
   }
 
   return loadedCount;
-}
-
-function resolveExistingRealpath(value: string): string | null {
-  try {
-    return fs.realpathSync(value);
-  } catch {
-    return null;
-  }
 }

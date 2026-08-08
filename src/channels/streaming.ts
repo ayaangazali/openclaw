@@ -1,5 +1,6 @@
 import { expectDefined } from "@openclaw/normalization-core";
 // Channel streaming config normalization and progress-draft formatting helpers.
+import { asNullableRecord as asObjectRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
 import { normalizeTrimmedStringList } from "@openclaw/normalization-core/string-normalization";
 import {
@@ -39,12 +40,6 @@ export type {
 export type { SlackChannelStreamingConfig } from "../config/types.slack.js";
 
 // Runtime reads are nested-only; doctor migrates legacy streaming spellings.
-
-function asObjectRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
 
 function asInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) ? value : undefined;
@@ -777,8 +772,38 @@ export function resolveChannelStreamingChunkMode(
 
 export function resolveChannelStreamingBlockEnabled(
   entry: StreamingCompatEntry | null | undefined,
+): boolean | undefined;
+export function resolveChannelStreamingBlockEnabled(
+  entry: StreamingCompatEntry | null | undefined,
+  previewPolicy: {
+    previewAvailable: boolean;
+    blockStreamingDefault?: "off" | "on";
+  },
+): boolean;
+export function resolveChannelStreamingBlockEnabled(
+  entry: StreamingCompatEntry | null | undefined,
+  previewPolicy?: {
+    previewAvailable: boolean;
+    blockStreamingDefault?: "off" | "on";
+  },
 ): boolean | undefined {
-  return asBoolean(getChannelStreamingConfigObject(entry)?.block?.enabled);
+  const explicitBlockStreaming = asBoolean(getChannelStreamingConfigObject(entry)?.block?.enabled);
+  if (typeof explicitBlockStreaming === "boolean" || !previewPolicy) {
+    return explicitBlockStreaming;
+  }
+  // Explicit channel choices beat the inherited agent default. Keep availability
+  // in the decision so a turn that cannot render a preview may still use blocks.
+  const explicitPreviewMode = parsePreviewStreamingMode(
+    getChannelStreamingConfigObject(entry)?.mode,
+  );
+  if (
+    previewPolicy.previewAvailable &&
+    explicitPreviewMode !== null &&
+    explicitPreviewMode !== "off"
+  ) {
+    return false;
+  }
+  return previewPolicy.blockStreamingDefault === "on";
 }
 
 export function resolveChannelStreamingBlockCoalesce(
@@ -800,10 +825,10 @@ export function resolveChannelStreamingPreviewToolProgress(
   defaultValue = true,
   /**
    * The channel's resolved stream mode. Only the caller knows it: channels pick
-   * their own default when `streaming.mode` is unset (Discord and Telegram use
-   * "progress", Slack and others "partial"), and this helper has no channel
-   * identity to guess with. Omitting it reads the configured mode and treats
-   * unset as "partial".
+   * their own default when `streaming.mode` is unset (Telegram uses "progress",
+   * Discord uses "off", and Slack uses "partial"), and this helper has no
+   * channel identity to guess with. Omitting it reads the configured mode and
+   * treats unset as "partial".
    */
   mode?: StreamingMode,
 ): boolean {
@@ -827,7 +852,7 @@ export function resolveChannelStreamingProgressCommentary(
    * resolveChannelStreamingPreviewToolProgress takes one: only the caller knows
    * which default applies when `streaming.mode` is unset. Guessing "partial"
    * here made `progress.commentary: true` a silent no-op on the progress-draft
-   * channels, whose own default is "progress".
+   * channels, such as Telegram, whose own default is "progress".
    */
   mode?: StreamingMode,
 ): boolean {
@@ -841,7 +866,7 @@ export function resolveChannelStreamingProgressCommentary(
 }
 
 // Pure toggle: progress-mode gating stays with the caller because channels
-// resolve their own default stream mode (Discord defaults to "progress").
+// resolve their own default stream mode.
 export function resolveChannelStreamingProgressNarration(
   entry: StreamingCompatEntry | null | undefined,
   defaultValue = true,

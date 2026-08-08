@@ -14,7 +14,13 @@ import { getActiveGatewayRootWorkCount } from "../process/gateway-work-admission
 import { createLazyPromise } from "../shared/lazy-runtime.js";
 import { STARTUP_UNAVAILABLE_GATEWAY_METHODS } from "./methods/core-descriptors.js";
 import { collectGatewayProcessMemoryUsageMb, finishGatewayRestartTrace } from "./restart-trace.js";
+import { createGatewayServerActiveWorkInspectors } from "./server-active-work.js";
+import { createGatewayChatMetadataLifecycle } from "./server-chat-metadata-lifecycle.js";
 import type { startGatewayCoreRuntime } from "./server-core-runtime.js";
+import {
+  attachInitialGatewayLifetimeSidecars,
+  publishGatewayLifetimeSidecars,
+} from "./server-lifetime-sidecars.js";
 import { GATEWAY_EVENTS } from "./server-methods-list.js";
 import { setFallbackGatewayContextResolver } from "./server-plugins.js";
 import {
@@ -29,9 +35,7 @@ import {
 
 type GatewayCoreRuntime = Awaited<ReturnType<typeof startGatewayCoreRuntime>>;
 type GatewayLogger = ReturnType<typeof createSubsystemLogger>;
-
 const [POST_READY_MAINTENANCE_DELAY_MS, RETAINED_PLUGIN_CLEANUP_DELAY_MS] = [250, 30_000];
-
 export async function finishGatewayStartup(params: {
   coreRuntime: GatewayCoreRuntime;
   port: number;
@@ -82,6 +86,7 @@ export async function finishGatewayStartup(params: {
     startupTrace,
     loadGatewayModelCatalog,
     loadGatewayModelCatalogSnapshot,
+    readPreparedGatewayModelCatalog,
     refreshGatewayHealthSnapshotWithRuntime,
     getRuntimeSnapshot,
     broadcast,
@@ -164,6 +169,7 @@ export async function finishGatewayStartup(params: {
     tailscaleMode,
     tailscaleConfig,
     controlUiBasePath,
+    controlUiRootLifecycle,
     sidecarStartup,
     workerLiveEvents,
     earlyRuntime,
@@ -190,6 +196,11 @@ export async function finishGatewayStartup(params: {
   const unavailableGatewayMethods = new Set<string>(
     minimalTestGateway ? [] : STARTUP_UNAVAILABLE_GATEWAY_METHODS,
   );
+  const chatMetadataLifecycle = await createGatewayChatMetadataLifecycle({
+    getConfig: getRuntimeConfig,
+    minimalTestGateway,
+    log,
+  });
   const gatewayRequestContext = await startupTrace.measure("gateway.request-context", async () => {
     const { createGatewayRequestContext } = await import("./server-request-context.js");
     return createGatewayRequestContext({
@@ -211,6 +222,9 @@ export async function finishGatewayStartup(params: {
       listSessionPendingApprovals: approvalSessionEvents.replay,
       loadGatewayModelCatalog,
       loadGatewayModelCatalogSnapshot,
+      readPreparedGatewayModelCatalog,
+      readChatMetadata: chatMetadataLifecycle.read,
+      readChatStartupProjection: chatMetadataLifecycle.readStartup,
       getHealthCache,
       refreshHealthSnapshot: refreshGatewayHealthSnapshotWithRuntime,
       logHealth,
@@ -285,6 +299,11 @@ export async function finishGatewayStartup(params: {
       broadcastVoiceWakeRoutingChanged,
     });
   });
+  await attachInitialGatewayLifetimeSidecars({
+    chatMetadataLifecycle,
+    gatewayRequestContext,
+    sidecars: runtimeState.gatewayLifetimeSidecars,
+  });
   pluginGatewayContext.current = gatewayRequestContext;
   const { createGatewayInstanceRuntime } = await import("./server-instance-runtime.js");
   const gatewayInstanceRuntimeLocal = createGatewayInstanceRuntime({
@@ -296,7 +315,6 @@ export async function finishGatewayStartup(params: {
   gatewayInstanceRuntimeRef.current = gatewayInstanceRuntimeLocal;
   gatewayRequestContext.approvalEvents = gatewayInstanceRuntimeLocal.approvalEvents;
   gatewayRequestContext.recoveryRuntime = gatewayInstanceRuntimeLocal.recovery;
-
   const fallbackGatewayContextCleanup: unknown = setFallbackGatewayContextResolver(
     () => gatewayRequestContext,
   );
@@ -307,7 +325,6 @@ export async function finishGatewayStartup(params: {
         }
       : () => {},
   );
-
   const [{ attachGatewayWsHandlers }, { listPluginNodeCapabilities }] = await startupTrace.measure(
     "gateway.ws-imports",
     () =>
@@ -387,6 +404,7 @@ export async function finishGatewayStartup(params: {
         log,
       });
       runtimeState.heartbeatRunner = activated.heartbeatRunner;
+      runtimeState.stopOutboundDeliveryRecovery = activated.stopOutboundDeliveryRecovery;
     });
   };
   ({
@@ -399,6 +417,7 @@ export async function finishGatewayStartup(params: {
         startGatewayPostAttachRuntime({
           minimalTestGateway,
           cfgAtStart,
+          getConfig: getRuntimeConfig,
           bindHost,
           bindHosts: httpBindHosts,
           port,
@@ -406,13 +425,15 @@ export async function finishGatewayStartup(params: {
           log,
           isNixMode,
           startupStartedAt: opts.startupStartedAt,
-          broadcast,
+          broadcastToConnIds,
+          getClientConnIds: gatewayRequestContext.getClientConnIds!,
           broadcastPluginEvent,
           tailscaleMode,
           resetOnExit: tailscaleConfig.resetOnExit ?? false,
           serviceName: tailscaleConfig.serviceName,
           preserveFunnel: tailscaleConfig.preserveFunnel ?? false,
           controlUiBasePath,
+          controlUiRootLifecycle,
           logTailscale,
           gatewayPluginConfigAtStart,
           activationSourceConfig: startupActivationSourceConfig,
@@ -426,6 +447,7 @@ export async function finishGatewayStartup(params: {
           logHooks,
           logChannels,
           unavailableGatewayMethods,
+          refreshChatMetadata: chatMetadataLifecycle.refresh,
           loadStartupPlugins: async () => {
             const { loadGatewayStartupPluginRuntime } = await loadStartupPluginsModule();
             return loadGatewayStartupPluginRuntime({
@@ -469,14 +491,12 @@ export async function finishGatewayStartup(params: {
             }
           },
           onGatewayLifetimeSidecars: (gatewayLifetimeSidecars) => {
-            runtimeState.gatewayLifetimeSidecars = gatewayLifetimeSidecars;
-            stopPostReadySidecarsAfterCloseStarted({
-              postReadySidecars: gatewayLifetimeSidecars,
+            runtimeState.gatewayLifetimeSidecars = publishGatewayLifetimeSidecars({
+              registered: runtimeState.gatewayLifetimeSidecars,
+              published: gatewayLifetimeSidecars,
               closeStarted: lifecycle.closePreludeStarted,
+              stopAfterCloseStarted: stopPostReadySidecarsAfterCloseStarted,
             });
-            if (lifecycle.closePreludeStarted) {
-              runtimeState.gatewayLifetimeSidecars = [];
-            }
           },
           ...(workerPlacementRuntime
             ? {
@@ -502,6 +522,7 @@ export async function finishGatewayStartup(params: {
           startupTrace,
           sidecarStartup,
           waitForPostReadyWork: params.waitForPostReadyWork,
+          activeWorkInspectors: createGatewayServerActiveWorkInspectors(gatewayRequestContext),
           providerAuthPrewarm: {
             getConfig: getRuntimeConfig,
           },
@@ -629,14 +650,12 @@ export async function finishGatewayStartup(params: {
         }
         return earlyRuntime.startMaintenance();
       },
-      applyMaintenance: (maintenance) => {
+      applyMaintenance: async (maintenance) => {
         if (lifecycle.closePreludeStarted) {
           clearInterval(maintenance.tickInterval);
           clearInterval(maintenance.healthInterval);
           clearInterval(maintenance.dedupeCleanup);
-          if (maintenance.mediaCleanup) {
-            clearInterval(maintenance.mediaCleanup);
-          }
+          await maintenance.stopMediaCleanup();
           clearInterval(maintenance.worktreeCleanup);
           maintenance.skillCuratorCleanup();
           return;
@@ -644,9 +663,12 @@ export async function finishGatewayStartup(params: {
         runtimeState.tickInterval = maintenance.tickInterval;
         runtimeState.healthInterval = maintenance.healthInterval;
         runtimeState.dedupeCleanup = maintenance.dedupeCleanup;
-        runtimeState.mediaCleanup = maintenance.mediaCleanup;
+        // Publish the stop owner before cleanup can touch SQLite or state paths;
+        // shutdown may begin immediately after this synchronous handoff.
+        runtimeState.stopMediaCleanup = maintenance.stopMediaCleanup;
         runtimeState.worktreeCleanup = maintenance.worktreeCleanup;
         runtimeState.skillCuratorCleanup = maintenance.skillCuratorCleanup;
+        maintenance.startMediaCleanup();
       },
       shouldStartCron: () => !lifecycle.closePreludeStarted && !cronStartState.handled,
       markCronStartHandled: () => {

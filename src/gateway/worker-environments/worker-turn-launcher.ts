@@ -9,6 +9,7 @@ import type {
 import { convertToLlm } from "../../agents/sessions/messages.js";
 import { SessionManager } from "../../agents/sessions/session-manager.js";
 import { emitAgentRunStatusEvent } from "../../infra/agent-run-status-events.js";
+import { emitTrustedDiagnosticEvent, isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { redactSensitiveText } from "../../logging/redact.js";
 import { parseWorkerLaunchDescriptor } from "../../worker/launch-descriptor.js";
@@ -248,6 +249,19 @@ async function executeWorkerTurn(params: {
     userMessageAlreadyPersisted && leaf?.type === "message" && leaf.message.role === "user"
       ? contextMessages.slice(0, -1)
       : contextMessages,
+    ({ bytes, limitBytes, reason }) => {
+      if (!isDiagnosticsEnabled(turn.config)) {
+        return;
+      }
+      emitTrustedDiagnosticEvent({
+        type: "payload.large",
+        surface: "worker.provider-replay",
+        action: "rejected",
+        bytes,
+        limitBytes,
+        reason,
+      });
+    },
   );
   let baseLeafId = manager.getLeafId();
   if (!userMessageAlreadyPersisted) {
@@ -256,7 +270,7 @@ async function executeWorkerTurn(params: {
       : undefined;
     if (persisted) {
       baseLeafId = persisted.messageId;
-      turn.userTurnTranscriptRecorder?.markRuntimePersisted(persisted.message);
+      turn.userTurnTranscriptRecorder?.markRuntimePersisted(persisted.message, persisted.admission);
       turn.onUserMessagePersisted?.(persisted.message);
     } else if (turn.userTurnTranscriptRecorder?.hasPersisted()) {
       baseLeafId = SessionManager.open(transcriptTarget).getLeafId();
@@ -572,7 +586,7 @@ export function createWorkerSessionTurnPlacementProvider(
       }
       return await executeLocalTurn({ claim, placements: options.placements, runLocal });
     },
-    async executeTurn(claim, turn, runLocal) {
+    async executeTurn(claim, turn, runLocal, onAdmitted) {
       const current = options.placements.get(claim.sessionId);
       if (
         !current &&
@@ -613,6 +627,8 @@ export function createWorkerSessionTurnPlacementProvider(
       const turnClaim = admitted.turnClaim;
       let handedOff = false;
       try {
+        // Remote turns never invoke runLocal; release queue protection only after their claim.
+        onAdmitted?.();
         const result = await executeWorkerTurn({
           environments: options.environments,
           onHandoff: () => {

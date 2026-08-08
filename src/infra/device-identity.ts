@@ -21,6 +21,7 @@ import {
   signEd25519Payload,
   verifyEd25519Signature,
 } from "./ed25519-signature.js";
+import { pruneMapToMaxSize } from "./map-size.js";
 
 export type { DeviceIdentity } from "./device-identity-store.js";
 
@@ -99,7 +100,10 @@ function withDeviceIdentityCoordinator<T>(
     path: resolved.databasePath,
     identityKey: resolved.identityKey,
   };
-  const coordinator = acquireDeviceIdentityCoordinator({ databasePath: resolved.databasePath });
+  const coordinator = acquireDeviceIdentityCoordinator({
+    databasePath: resolved.databasePath,
+    env: options.env,
+  });
   let result: T;
   try {
     result = operation(resolved, resolvedOptions);
@@ -121,11 +125,14 @@ function withDeviceIdentityCoordinator<T>(
 }
 
 function loadOrCreateDeviceIdentityOwned(options: DeviceIdentityStoreOptions): DeviceIdentity {
-  assertNoPendingLegacyIdentity(options);
-  const existing = readStoredDeviceIdentity(options);
+  const { databasePath } = resolveDeviceIdentityStore(options);
+  // A downgrade can recreate retired JSON after SQLite migration. Once this profile has
+  // a canonical row, keep it authoritative and leave the retired source for Doctor.
+  const existing = pathMayExist(databasePath) ? readStoredDeviceIdentity(options) : null;
   if (existing) {
     return toDeviceIdentity(existing);
   }
+  assertNoPendingLegacyIdentity(options);
 
   // Generate outside the write transaction. The transaction rereads the row
   // before inserting so concurrent runtimes converge on one authoritative key.
@@ -150,19 +157,13 @@ export function loadOrCreateProcessDeviceIdentity(
   options: DeviceIdentityStoreOptions = {},
 ): DeviceIdentity {
   return withDeviceIdentityCoordinator(options, (resolved, resolvedOptions) => {
-    assertNoPendingLegacyIdentity(resolvedOptions);
     const cacheKey = `${resolved.databasePath}\0${resolved.identityKey}`;
     const cached = processDeviceIdentities.get(cacheKey);
     if (cached) {
       return cached;
     }
     const identity = loadOrCreateDeviceIdentityOwned(resolvedOptions);
-    if (processDeviceIdentities.size >= MAX_PROCESS_DEVICE_IDENTITIES) {
-      const oldestKey = processDeviceIdentities.keys().next().value;
-      if (oldestKey !== undefined) {
-        processDeviceIdentities.delete(oldestKey);
-      }
-    }
+    pruneMapToMaxSize(processDeviceIdentities, MAX_PROCESS_DEVICE_IDENTITIES - 1);
     processDeviceIdentities.set(cacheKey, identity);
     return identity;
   });
@@ -173,9 +174,12 @@ export function loadDeviceIdentityIfPresent(
   options: DeviceIdentityStoreOptions = {},
 ): DeviceIdentity | null {
   return withDeviceIdentityCoordinator(options, (_resolved, resolvedOptions) => {
-    assertNoPendingLegacyIdentity(resolvedOptions);
     const stored = readStoredDeviceIdentityReadOnly(resolvedOptions);
-    return stored ? toDeviceIdentity(stored) : null;
+    if (stored) {
+      return toDeviceIdentity(stored);
+    }
+    assertNoPendingLegacyIdentity(resolvedOptions);
+    return null;
   });
 }
 

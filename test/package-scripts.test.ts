@@ -185,9 +185,27 @@ describe("package scripts", () => {
     );
   });
 
+  it("runs direct-run entrypoint coverage in Windows CI", () => {
+    expect(readPackageJson().scripts["test:windows:ci"]).toContain(
+      "test/scripts/direct-run-entrypoints.test.ts",
+    );
+  });
+
   it("runs Docker package process-tree coverage in Windows CI", () => {
     expect(readPackageJson().scripts["test:windows:ci"]).toContain(
       "test/e2e/qa-lab/runtime/package-openclaw-for-docker.e2e.test.ts",
+    );
+  });
+
+  it("runs Doctor SecretRef ACL coverage in Windows CI", () => {
+    expect(readPackageJson().scripts["test:windows:ci"]).toContain(
+      "test/e2e/qa-lab/runtime/doctor-auth-secretref-checks.e2e.test.ts",
+    );
+  });
+
+  it("runs the Doctor managed-service SecretRef renderer in Windows CI", () => {
+    expect(readPackageJson().scripts["test:windows:ci"]).toContain(
+      "src/commands/doctor-gateway-auth-token.windows.test.ts",
     );
   });
 
@@ -236,6 +254,13 @@ describe("package scripts", () => {
   it("runs backup verification coverage in Windows CI", () => {
     expect(readPackageJson().scripts["test:windows:ci"]).toContain(
       "src/commands/backup-verify.test.ts",
+    );
+  });
+
+  it("runs SQLite transcript archive worker coverage in Windows CI", () => {
+    const windowsCi = readPackageJson().scripts["test:windows:ci"];
+    expect(windowsCi).toContain(
+      "src/config/sessions/session-accessor.sqlite-archive.worker.test.ts",
     );
   });
 

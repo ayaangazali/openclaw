@@ -1,4 +1,12 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createDraftStreamLoop } from "../../channels/draft-stream-loop.js";
+import {
+  getDiagnosticSessionActivitySnapshot,
+  markDiagnosticEmbeddedRunStarted,
+  resetDiagnosticRunActivityForTest,
+} from "../../logging/diagnostic-run-activity.js";
+import { markDiagnosticModelStartedForTest } from "../../logging/diagnostic-run-activity.test-support.js";
+import type { PartialReplyPayload } from "../get-reply-options.types.js";
 import type { GetReplyOptions } from "../types.js";
 import {
   setupAgentRunnerExecutionTestState,
@@ -17,7 +25,28 @@ import type {
 } from "./agent-runner-execution.test-support.js";
 import type { AgentTurnParams } from "./agent-runner-execution.types.js";
 
+const sanitizerState = vi.hoisted(() => ({
+  sanitizeUserFacingText: vi.fn(),
+}));
+
+vi.mock("../../agents/embedded-agent-helpers/sanitize-user-facing-text.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../agents/embedded-agent-helpers/sanitize-user-facing-text.js")
+  >("../../agents/embedded-agent-helpers/sanitize-user-facing-text.js");
+  sanitizerState.sanitizeUserFacingText.mockImplementation(actual.sanitizeUserFacingText);
+  return {
+    ...actual,
+    sanitizeUserFacingText: (...args: Parameters<typeof actual.sanitizeUserFacingText>) =>
+      sanitizerState.sanitizeUserFacingText(...args),
+  };
+});
+
 const state = setupAgentRunnerExecutionTestState();
+
+beforeEach(() => {
+  sanitizerState.sanitizeUserFacingText.mockClear();
+  resetDiagnosticRunActivityForTest();
+});
 
 async function executeTestTurn(
   params?: Parameters<typeof createMinimalRunAgentTurnParams>[0],
@@ -28,6 +57,49 @@ async function executeTestTurn(
 }
 
 describe("executeAgentTurn: lifecycle progress", () => {
+  it("keeps operational agent events from resetting repeated request evidence", async () => {
+    state.runEmbeddedAgentMock.mockImplementationOnce(async (params: EmbeddedAgentParams) => {
+      const sessionId = params.sessionId ?? "session";
+      const sessionKey = params.sessionKey ?? "main";
+      markDiagnosticEmbeddedRunStarted({ sessionId, sessionKey, runId: params.runId });
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        markDiagnosticModelStartedForTest({
+          sessionId,
+          sessionKey,
+          runId: params.runId,
+          provider: "mock",
+          model: "request-model",
+          observationUnit: "request",
+        });
+      }
+      expect(
+        getDiagnosticSessionActivitySnapshot({ sessionId, sessionKey })
+          .repeatedRequestNoProgressAgeMs,
+      ).toBe(0);
+
+      for (const event of [
+        { stream: "assistant", data: { phase: "commentary", text: "Working" } },
+        { stream: "tool", data: { phase: "start", name: "read", toolCallId: "call-1" } },
+        {
+          stream: "tool",
+          data: { phase: "result", name: "read", toolCallId: "call-1", isError: false },
+        },
+        { stream: "item", data: { phase: "end", status: "completed", itemId: "item-1" } },
+        { stream: "thinking", data: { delta: "internal" } },
+        { stream: "custom.runtime", data: { status: "ready" } },
+      ]) {
+        await params.onAgentEvent?.(event);
+      }
+      expect(
+        getDiagnosticSessionActivitySnapshot({ sessionId, sessionKey })
+          .repeatedRequestNoProgressAgeMs,
+      ).toBeGreaterThanOrEqual(0);
+      return { payloads: [{ text: "final" }], meta: {} };
+    });
+
+    await executeTestTurn();
+  });
+
   it("forwards item lifecycle events to reply options", async () => {
     const onItemEvent = vi.fn();
     state.runEmbeddedAgentMock.mockImplementationOnce(async (params: EmbeddedAgentParams) => {
@@ -392,6 +464,120 @@ describe("executeAgentTurn: lifecycle progress", () => {
 
     expect(result.kind).toBe("success");
     expect(typingSignals.signalTextDelta).toHaveBeenCalledWith("before failure");
+  });
+
+  it("materializes sanitized partial text at the consumer's rate", async () => {
+    const partials = Array.from({ length: 24 }, (_, index) => `partial ${index + 1}`);
+    const emptyPayload: PartialReplyPayload = {};
+    const delivered: string[] = [];
+    let latestPayload: PartialReplyPayload | undefined;
+    const draftLoop = createDraftStreamLoop<PartialReplyPayload>({
+      throttleMs: 60_000,
+      isStopped: () => false,
+      emptyValue: emptyPayload,
+      isEmpty: (payload) => payload === emptyPayload,
+      sendOrEditStreamMessage: async (payload) => {
+        const text = payload.text;
+        if (text !== undefined) {
+          delivered.push(text);
+        }
+      },
+    });
+    draftLoop.update({ text: "seed" });
+    await draftLoop.flush();
+    sanitizerState.sanitizeUserFacingText.mockClear();
+    state.runEmbeddedAgentMock.mockImplementationOnce(async (params: EmbeddedAgentParams) => {
+      for (const text of partials) {
+        await params.onPartialReply?.({ text });
+      }
+      return { payloads: [], meta: {} };
+    });
+
+    await executeTestTurn({
+      opts: {
+        onPartialReply: (payload) => {
+          latestPayload = payload;
+          draftLoop.update(payload);
+        },
+      },
+    });
+
+    expect(sanitizerState.sanitizeUserFacingText).not.toHaveBeenCalled();
+    await draftLoop.flush();
+    expect(delivered).toEqual(["seed", partials.at(-1)]);
+    expect(latestPayload?.text).toBe(partials.at(-1));
+    expect(latestPayload?.text).toBe(partials.at(-1));
+    expect(sanitizerState.sanitizeUserFacingText).toHaveBeenCalledTimes(1);
+    draftLoop.stop();
+
+    sanitizerState.sanitizeUserFacingText.mockClear();
+    state.runEmbeddedAgentMock.mockImplementationOnce(async (params: EmbeddedAgentParams) => {
+      for (const text of partials) {
+        await params.onPartialReply?.({ text });
+      }
+      return { payloads: [], meta: {} };
+    });
+
+    await executeTestTurn({
+      opts: {
+        onPartialReply: (payload) => {
+          void payload.text;
+        },
+      },
+    });
+
+    expect(sanitizerState.sanitizeUserFacingText).toHaveBeenCalledTimes(partials.length);
+  });
+
+  it("keeps lazy partial text enumerable and memoized across serialization", async () => {
+    let captured: PartialReplyPayload | undefined;
+    state.runEmbeddedAgentMock.mockImplementationOnce(async (params: EmbeddedAgentParams) => {
+      await params.onPartialReply?.({ text: "visible partial" });
+      return { payloads: [], meta: {} };
+    });
+
+    await executeTestTurn({
+      opts: {
+        onPartialReply: (payload) => {
+          captured = payload;
+        },
+      },
+    });
+
+    expect(captured).toBeDefined();
+    expect(Object.prototype.propertyIsEnumerable.call(captured, "text")).toBe(true);
+    expect(Object.keys(captured ?? {})).toContain("text");
+    expect(sanitizerState.sanitizeUserFacingText).not.toHaveBeenCalled();
+    expect(JSON.stringify(captured)).toBe('{"text":"visible partial"}');
+    expect(captured?.text).toBe("visible partial");
+    expect(sanitizerState.sanitizeUserFacingText).toHaveBeenCalledTimes(1);
+  });
+
+  it("materializes sanitizer-empty partial text to undefined", async () => {
+    let captured: PartialReplyPayload | undefined;
+    const typingSignals = createMockTypingSignaler();
+    state.runEmbeddedAgentMock.mockImplementationOnce(async (params: EmbeddedAgentParams) => {
+      await params.onPartialReply?.({ text: "[tool calls omitted]" });
+      return { payloads: [], meta: {} };
+    });
+
+    await executeTestTurn(
+      {
+        opts: {
+          onPartialReply: (payload) => {
+            captured = payload;
+          },
+        },
+      },
+      { typingSignals },
+    );
+
+    expect(captured).toBeDefined();
+    expect(sanitizerState.sanitizeUserFacingText).not.toHaveBeenCalled();
+    expect(captured?.text).toBeUndefined();
+    expect(captured?.text).toBeUndefined();
+    expect(sanitizerState.sanitizeUserFacingText).toHaveBeenCalledTimes(1);
+    expect(typingSignals.signalTextDelta).toHaveBeenCalledWith("[tool calls omitted]");
   });
 
   it("leaves Codex app-server telemetry publication to the harness", async () => {

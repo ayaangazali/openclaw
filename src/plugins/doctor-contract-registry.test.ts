@@ -4,6 +4,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { withMockedPlatform } from "../test-utils/vitest-spies.js";
+import { resolvePluginDoctorContractArtifactPath } from "./doctor-contract-artifact.js";
 import { cleanupTrackedTempDirs, makeTrackedTempDir } from "./test-helpers/fs-fixtures.js";
 import {
   getRegistryJitiMocks,
@@ -12,6 +13,18 @@ import {
 
 const tempDirs: string[] = [];
 const mocks = getRegistryJitiMocks();
+const doctorContractWarnMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../logging/subsystem.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../logging/subsystem.js")>();
+  return {
+    ...actual,
+    createSubsystemLogger: (subsystem: string) => ({
+      ...actual.createSubsystemLogger(subsystem),
+      warn: doctorContractWarnMock,
+    }),
+  };
+});
 
 let applyPluginDoctorCompatibilityMigrations: typeof import("./doctor-contract-registry.js").applyPluginDoctorCompatibilityMigrations;
 let clearPluginDoctorContractRegistryCache: typeof import("./doctor-contract-registry.test-fixtures.js").clearPluginDoctorContractRegistryCache;
@@ -44,6 +57,7 @@ afterEach(() => {
 describe("doctor-contract-registry module loader", () => {
   beforeEach(async () => {
     resetRegistryJitiMocks();
+    doctorContractWarnMock.mockReset();
     vi.resetModules();
     ({
       applyPluginDoctorCompatibilityMigrations,
@@ -59,6 +73,100 @@ describe("doctor-contract-registry module loader", () => {
     } = await import("./doctor-contract-registry.test-fixtures.js"));
     setPluginDoctorContractRegistryModuleLoaderFactoryForTest(mocks.createJiti);
     clearPluginDoctorContractRegistryCache();
+  });
+
+  it("preserves source artifact precedence across root and dist candidates", () => {
+    const pluginRoot = makeTempDir();
+    const distRoot = path.join(pluginRoot, "dist");
+    fs.mkdirSync(distRoot);
+    const rootDoctorTypeScript = path.join(pluginRoot, "doctor-contract-api.ts");
+    const distDoctorTypeScript = path.join(distRoot, "doctor-contract-api.ts");
+    const rootDoctorJavaScript = path.join(pluginRoot, "doctor-contract-api.js");
+    const rootContractTypeScript = path.join(pluginRoot, "contract-api.ts");
+    for (const filePath of [
+      rootDoctorTypeScript,
+      distDoctorTypeScript,
+      rootDoctorJavaScript,
+      rootContractTypeScript,
+    ]) {
+      fs.writeFileSync(filePath, "export {};\n", "utf-8");
+    }
+
+    expect(resolvePluginDoctorContractArtifactPath(pluginRoot)).toBe(rootDoctorTypeScript);
+    fs.rmSync(rootDoctorTypeScript);
+    expect(resolvePluginDoctorContractArtifactPath(pluginRoot)).toBe(distDoctorTypeScript);
+    fs.rmSync(distDoctorTypeScript);
+    expect(resolvePluginDoctorContractArtifactPath(pluginRoot)).toBe(rootDoctorJavaScript);
+    fs.rmSync(rootDoctorJavaScript);
+    expect(resolvePluginDoctorContractArtifactPath(pluginRoot)).toBe(rootContractTypeScript);
+  });
+
+  it.each([
+    {
+      name: "declared false skips loading",
+      doctorContract: { legacyConfigRules: false },
+      expectedRuleCount: 0,
+      expectedLoadCount: 0,
+    },
+    {
+      name: "absent declaration preserves loading",
+      doctorContract: undefined,
+      expectedRuleCount: 1,
+      expectedLoadCount: 1,
+    },
+    {
+      name: "declared true loads the authoritative module",
+      doctorContract: { legacyConfigRules: true },
+      expectedRuleCount: 1,
+      expectedLoadCount: 1,
+    },
+  ])("gates doctor contract artifacts by surface: $name", (testCase) => {
+    const pluginRoot = makeTempDir();
+    fs.writeFileSync(path.join(pluginRoot, "doctor-contract-api.ts"), "export {};\n", "utf-8");
+    mocks.createJiti.mockImplementation(() => () => ({
+      legacyConfigRules: [{ path: ["plugins", "entries", "demo"], message: "demo rule" }],
+    }));
+    mocks.loadPluginManifestRegistry.mockReturnValue({
+      plugins: [
+        {
+          id: "test-plugin",
+          rootDir: pluginRoot,
+          ...(testCase.doctorContract ? { doctorContract: testCase.doctorContract } : {}),
+        },
+      ],
+      diagnostics: [],
+    });
+
+    expect(listPluginDoctorLegacyConfigRules({ workspaceDir: pluginRoot, env: {} })).toHaveLength(
+      testCase.expectedRuleCount,
+    );
+    expect(mocks.createJiti).toHaveBeenCalledTimes(testCase.expectedLoadCount);
+  });
+
+  it("records doctor contract load failures with plugin and artifact context", () => {
+    const pluginRoot = makeTempDir();
+    const contractSource = path.join(pluginRoot, "doctor-contract-api.ts");
+    fs.writeFileSync(contractSource, "export {};\n", "utf-8");
+    mocks.createJiti.mockImplementation(() => () => {
+      throw new Error("fixture module load failed");
+    });
+    mocks.loadPluginManifestRegistry.mockReturnValue({
+      plugins: [
+        {
+          id: "broken-doctor-plugin",
+          rootDir: pluginRoot,
+          doctorContract: { legacyConfigRules: true },
+        },
+      ],
+      diagnostics: [],
+    });
+
+    expect(listPluginDoctorLegacyConfigRules({ workspaceDir: pluginRoot, env: {} })).toEqual([]);
+    expect(doctorContractWarnMock).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining(
+        `failed to load doctor contract for broken-doctor-plugin from ${contractSource}: fixture module load failed`,
+      ),
+    );
   });
 
   it("uses native require on Windows for compatible JavaScript contract-api modules", () => {

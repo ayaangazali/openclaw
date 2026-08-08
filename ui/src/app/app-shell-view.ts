@@ -10,8 +10,7 @@ import { icons } from "../components/icons.ts";
 import { renderSettingsSidebar } from "../components/settings-sidebar.ts";
 import type { ThemeModeChangeDetail } from "../components/theme-mode-toggle.ts";
 import { t } from "../i18n/index.ts";
-import { copyToClipboard } from "../lib/clipboard.ts";
-import { isGatewayMethodAdvertised } from "../lib/gateway-methods.ts";
+import { canCallGatewayMethod, isGatewayMethodAdvertised } from "../lib/gateway-methods.ts";
 import { readSessionMethodAccess } from "../lib/session-method-access.ts";
 import { normalizeAgentId } from "../lib/sessions/session-key.ts";
 import { isTerminalAvailable } from "../lib/terminal-availability.ts";
@@ -39,7 +38,6 @@ import {
   loadSettings,
   normalizeCatalogOpenTarget,
 } from "./settings.ts";
-import { resolveControlUiRefreshRequiredBanner } from "./update-overlay-helpers.ts";
 
 const EMPTY_OUTBOX_COUNT_FOR_SESSION = () => 0;
 const PALETTE_SHORTCUT = /Mac|iP(hone|ad|od)/i.test(globalThis.navigator?.platform ?? "")
@@ -94,6 +92,9 @@ export function renderApplicationShell(host: ShellViewHost) {
   const gatewaySnapshot = context.gateway.snapshot;
   const gatewayConnected = gatewaySnapshot.phase === "connected";
   const operatorAccess = readGatewayOperatorAccess(gatewaySnapshot);
+  const canUpdate = canCallGatewayMethod(gatewaySnapshot, "update.run", "operator.admin");
+  const canHoldUpdate =
+    canUpdate && canCallGatewayMethod(gatewaySnapshot, "update.hold", "operator.admin");
   const outboxScopeHost = host.storedOutboxScopeHost(context);
   const outboxStoreRuntime = host.outboxStoreRuntime;
   const storedOutboxes = outboxStoreRuntime
@@ -150,6 +151,7 @@ export function renderApplicationShell(host: ShellViewHost) {
     !navDrawerOpen &&
     !settingsTakeover;
   const navigationSurfaceHidden = navigationSurfaceIsHidden({
+    onboarding,
     navCollapsed,
     navDrawerOpen,
     mobileNavLayout,
@@ -198,6 +200,7 @@ export function renderApplicationShell(host: ShellViewHost) {
       terminalAvailable,
       catalogOpenTarget: normalizeCatalogOpenTarget(uiSettings.catalogOpenTarget),
       canPairDevice: gatewayConnected && (operatorAccess.canAdmin || operatorAccess.canPair),
+      preferencesBrowserOnly: gatewayConnected && context.runtimeConfig.canPatch === false,
       sidebarEntries: navigationSnapshot.sidebarEntries,
       workboardBoards: host.sidebarWorkboardSnapshot.boards,
       workboardBoardsReady: host.sidebarWorkboardSnapshot.ready,
@@ -211,8 +214,15 @@ export function renderApplicationShell(host: ShellViewHost) {
         context.config.current.serverVersion ?? gatewaySnapshot.hello?.server?.version ?? null,
       devGitBranch: context.config.current.devGitBranch,
       updateAvailable: navigationSurfaceHidden ? null : overlaySnapshot.updateAvailable,
+      updateSchedule: navigationSurfaceHidden ? null : overlaySnapshot.updateSchedule,
+      heldUpdateCampaignId: overlaySnapshot.heldUpdateCampaignId,
       updateRunning: overlaySnapshot.updateRunning,
+      canUpdate,
+      canHoldUpdate,
       onUpdate: () => void context.overlays.runUpdate(),
+      refreshRequired: navigationSurfaceHidden ? false : overlaySnapshot.controlUiRefreshRequired,
+      onRefresh: () => host.refreshControlUi(),
+      onHoldUpdate: () => context.overlays.holdUpdate(),
       onOpenApprovals: () => host.openApprovals(),
       onRetryConnect: () => context.gateway.connect(),
       onOpenNewSession: openNewSession,
@@ -239,8 +249,15 @@ export function renderApplicationShell(host: ShellViewHost) {
         gatewayVersion:
           context.config.current.serverVersion ?? gatewaySnapshot.hello?.server?.version ?? "",
         updateAvailable: navigationSurfaceHidden ? null : overlaySnapshot.updateAvailable,
+        updateSchedule: navigationSurfaceHidden ? null : overlaySnapshot.updateSchedule,
+        heldUpdateCampaignId: overlaySnapshot.heldUpdateCampaignId,
         updateRunning: overlaySnapshot.updateRunning,
+        canUpdate,
+        canHoldUpdate,
         onUpdate: () => void context.overlays.runUpdate(),
+        refreshRequired: navigationSurfaceHidden ? false : overlaySnapshot.controlUiRefreshRequired,
+        onRefresh: () => host.refreshControlUi(),
+        onHoldUpdate: () => context.overlays.holdUpdate(),
         searchQuery: host.settingsSearchQuery,
         searchBlockMatches: settingsSearchBlocks,
         onExit: () => host.exitSettings(),
@@ -257,6 +274,7 @@ export function renderApplicationShell(host: ShellViewHost) {
           needsApply: runtimeConfig.configNeedsApply,
           applying: runtimeConfig.configApplying,
           applyDisabled:
+            context.runtimeConfig.canApply === false ||
             runtimeConfig.configLoading ||
             runtimeConfig.configSaving ||
             (runtimeConfig.configFormDirty && runtimeConfig.configFormMode === "raw") ||
@@ -397,7 +415,8 @@ export function renderApplicationShell(host: ShellViewHost) {
         .tabIndex=${-1}
       >
         ${gatewaySnapshot.hello?.deviceAuthMigration?.pending === true
-          ? customElements.get("openclaw-device-auth-migration-banner")
+          ? // The migration banner is registered by a rare-flow dynamic import after first render.
+            customElements.get("openclaw-device-auth-migration-banner")
             ? html`<openclaw-device-auth-migration-banner
                 .props=${{
                   state: overlaySnapshot.deviceAuthMigration,
@@ -414,16 +433,7 @@ export function renderApplicationShell(host: ShellViewHost) {
                   },
                 }}
               ></openclaw-update-banner>`
-          : html`<openclaw-update-banner
-              .props=${{
-                statusBanner: overlaySnapshot.controlUiRefreshRequired
-                  ? resolveControlUiRefreshRequiredBanner()
-                  : null,
-                action: overlaySnapshot.controlUiRefreshRequired
-                  ? { label: t("common.refresh"), onClick: () => host.refreshControlUi() }
-                  : undefined,
-              }}
-            ></openclaw-update-banner>`}
+          : nothing}
         <openclaw-update-banner
           .props=${{
             statusBanner: overlaySnapshot.updateStatusBanner,
@@ -433,8 +443,15 @@ export function renderApplicationShell(host: ShellViewHost) {
           navigationSurfaceHidden,
           onboarding,
           updateAvailable: overlaySnapshot.updateAvailable,
+          updateSchedule: overlaySnapshot.updateSchedule,
+          heldUpdateCampaignId: overlaySnapshot.heldUpdateCampaignId,
           updateRunning: overlaySnapshot.updateRunning,
+          canUpdate,
+          canHoldUpdate,
           onUpdate: () => void context.overlays.runUpdate(),
+          refreshRequired: overlaySnapshot.controlUiRefreshRequired,
+          onRefresh: () => host.refreshControlUi(),
+          onHoldUpdate: () => context.overlays.holdUpdate(),
         })}
         <openclaw-router-outlet
           .router=${runtime.router}
@@ -489,7 +506,6 @@ export function renderApplicationShell(host: ShellViewHost) {
         onRefresh: () => void context.overlays.refreshDevicePairSetup(),
         onAccessChange: (access) => void context.overlays.setDevicePairSetupAccess(access),
         onClose: () => context.overlays.closeDevicePairSetup(),
-        onCopy: (setupCode) => void copyToClipboard(setupCode),
         onManageDevices: () => {
           context.overlays.closeDevicePairSetup();
           host.navigate("nodes");

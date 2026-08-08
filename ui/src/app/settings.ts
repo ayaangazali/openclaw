@@ -30,6 +30,7 @@ type PersistedUiSettings = Omit<UiSettings, "token" | "sessionKey" | "lastActive
   sessionsByGateway?: Record<string, ScopedSessionSelection>;
 };
 
+import { safeParseJson } from "@openclaw/normalization-core";
 import {
   DEFAULT_SIDEBAR_ENTRIES,
   normalizeSidebarEntries,
@@ -219,7 +220,7 @@ export type UiSettings = {
 
 type LastActiveSessionHost = {
   settings: UiSettings;
-  applySettings(next: UiSettings): void;
+  applySettings(patch: Partial<UiSettings>): void;
 };
 
 export function setLastActiveSessionKey(host: LastActiveSessionHost, next: string) {
@@ -227,7 +228,7 @@ export function setLastActiveSessionKey(host: LastActiveSessionHost, next: strin
   if (!trimmed || host.settings.lastActiveSessionKey === trimmed) {
     return;
   }
-  host.applySettings({ ...host.settings, lastActiveSessionKey: trimmed });
+  host.applySettings({ lastActiveSessionKey: trimmed });
 }
 
 function isViteDevPage(): boolean {
@@ -291,11 +292,7 @@ function parsePersistedSettings(raw: string | null): PersistedUiSettings | null 
   if (!raw) {
     return null;
   }
-  try {
-    return JSON.parse(raw) as PersistedUiSettings;
-  } catch {
-    return null;
-  }
+  return (safeParseJson(raw) as PersistedUiSettings | undefined) ?? null;
 }
 
 function settingsMatchGatewayTarget(parsed: PersistedUiSettings, targetUrl: string): boolean {

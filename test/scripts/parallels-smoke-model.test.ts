@@ -1246,15 +1246,19 @@ kill -TERM "$$"`,
 
     withEnv(fakePrlctlEnv(tempDir), () => {
       const linuxPhases = new ExhaustedCleanupPhaseRunner();
-      const linux = new LinuxGuest("Linux VM", linuxPhases as unknown as PhaseRunner);
+      const cleanupLinux = new LinuxGuest("Linux VM", linuxPhases as unknown as PhaseRunner);
 
-      expect(() => linux.bash("echo linux")).toThrow("Linux guest command failed with exit code 1");
+      expect(() => cleanupLinux.bash("echo linux")).toThrow(
+        "Linux guest command failed with exit code 1",
+      );
       expect(linuxPhases.remainingTimeoutCalls).toBe(2);
 
       const macosPhases = new ExhaustedCleanupPhaseRunner();
-      const macos = createMacosGuest(macosPhases as unknown as PhaseRunner);
+      const cleanupMacos = createMacosGuest(macosPhases as unknown as PhaseRunner);
 
-      expect(() => macos.sh("echo macos")).toThrow("macOS guest command failed with exit code 1");
+      expect(() => cleanupMacos.sh("echo macos")).toThrow(
+        "macOS guest command failed with exit code 1",
+      );
       expect(macosPhases.remainingTimeoutCalls).toBe(2);
     });
 
@@ -1274,9 +1278,9 @@ kill -TERM "$$"`,
         append: () => undefined,
         remainingTimeoutMs: (fallbackMs?: number) => fallbackMs ?? 30_000,
       };
-      const macos = createMacosGuest(phases as unknown as PhaseRunner);
+      const unavailableMacos = createMacosGuest(phases as unknown as PhaseRunner);
 
-      expect(() => macos.exec(["true"])).toThrow(
+      expect(() => unavailableMacos.exec(["true"])).toThrow(
         "macOS guest command failed: Parallels guest session unavailable",
       );
     });
@@ -1284,7 +1288,7 @@ kill -TERM "$$"`,
 
   it("streams full phase logs to disk while bounding the failure tail", async () => {
     const runDir = makeTempDir(tempDirs, "openclaw-parallels-phase-");
-    const phaseRunner = new PhaseRunner(runDir, 128);
+    const logPhaseRunner = new PhaseRunner(runDir, 128);
     const writes: string[] = [];
     const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
       writes.push(String(chunk));
@@ -1293,9 +1297,9 @@ kill -TERM "$$"`,
 
     try {
       await expect(
-        phaseRunner.phase("noisy", 30, () => {
-          phaseRunner.append(`old-${"x".repeat(256)}`);
-          phaseRunner.append("recent failure");
+        logPhaseRunner.phase("noisy", 30, () => {
+          logPhaseRunner.append(`old-${"x".repeat(256)}`);
+          logPhaseRunner.append("recent failure");
           throw new Error("phase failed");
         }),
       ).rejects.toThrow("phase failed");
@@ -1314,12 +1318,12 @@ kill -TERM "$$"`,
 
   it("clamps oversized phase timers before scheduling", async () => {
     const runDir = makeTempDir(tempDirs, "openclaw-parallels-phase-timeout-");
-    const phaseRunner = new PhaseRunner(runDir, 128);
+    const timerPhaseRunner = new PhaseRunner(runDir, 128);
     const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
 
     try {
       await expect(
-        phaseRunner.phase("oversized", MAX_TIMER_TIMEOUT_SECONDS + 1, () => undefined),
+        timerPhaseRunner.phase("oversized", MAX_TIMER_TIMEOUT_SECONDS + 1, () => undefined),
       ).resolves.toBeUndefined();
       expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), MAX_TIMER_TIMEOUT_MS);
       expect(readFileSync(join(runDir, "phase-timings.json"), "utf8")).toContain(
@@ -1617,6 +1621,41 @@ kill -TERM "$$"`,
     expect(runCommand).toHaveBeenCalledTimes(1);
   });
 
+  it("fails boundedly when Windows background polling loses guest transport", async () => {
+    const retries: string[] = [];
+    let donePolls = 0;
+    const runCommand = vi.fn((_command: string, args: string[], options?: { input?: string }) => {
+      const command = args.at(-1) ?? "";
+      if (options?.input) {
+        return { status: 0, stderr: "", stdout: "" };
+      }
+      if (args.includes("--current-user")) {
+        return { status: 0, stderr: "", stdout: "started\n" };
+      }
+      if (args.includes("cmd.exe") && command.includes("echo wait")) {
+        donePolls++;
+        return { status: 124, stderr: "", stdout: "" };
+      }
+      return { status: 0, stderr: "", stdout: "" };
+    });
+
+    await expect(
+      runWindowsBackgroundPowerShell({
+        label: "ref-onboard",
+        onLaunchRetry: (message) => retries.push(message),
+        pollIntervalMs: 1,
+        runCommand,
+        script: "Write-Output ok",
+        timeoutMs: 720_000,
+        vmName: "Windows 11",
+      }),
+    ).rejects.toThrow("ref-onboard done poll failed after 3 consecutive guest transport errors");
+
+    expect(donePolls).toBe(3);
+    expect(retries).toHaveLength(3);
+    expect(retries.at(-1)).toContain("transport failure 3/3");
+  });
+
   it("returns timed-out host command status when check is disabled", () => {
     const result = runNode("process.stdout.write('partial'); setTimeout(() => {}, 1000);", {
       check: false,
@@ -1699,6 +1738,52 @@ kill -TERM "$$"`,
       } finally {
         if (grandchildPid && isProcessAlive(grandchildPid)) {
           process.kill(grandchildPid, "SIGKILL");
+        }
+      }
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "settles timed host commands when an escaped descendant retains child pipes",
+    () => {
+      const tempDir = makeTempDir(tempDirs, "openclaw-parallels-host-command-pipes-");
+      const grandchildPidPath = join(tempDir, "grandchild.pid");
+      let grandchildPid = 0;
+      const grandchildScript = [
+        "const { writeFileSync } = require('node:fs');",
+        "writeFileSync(process.env.GRANDCHILD_PID_PATH, String(process.pid));",
+        "setInterval(() => {}, 1000);",
+      ].join("\n");
+      const parentScript = [
+        "const { spawn } = require('node:child_process');",
+        `const child = spawn(process.execPath, ['-e', ${JSON.stringify(grandchildScript)}], {`,
+        "  detached: true,",
+        "  env: process.env,",
+        "  stdio: ['ignore', 'inherit', 'inherit'],",
+        "});",
+        "child.unref();",
+        "setInterval(() => {}, 1000);",
+      ].join("\n");
+      const startedAt = Date.now();
+
+      try {
+        const result = run(process.execPath, ["-e", parentScript], {
+          check: false,
+          env: {
+            ...process.env,
+            GRANDCHILD_PID_PATH: grandchildPidPath,
+          },
+          quiet: true,
+          timeoutMs: 100,
+        });
+
+        expect(result.status).toBe(124);
+        expect(Date.now() - startedAt).toBeLessThan(2_000);
+        grandchildPid = Number.parseInt(readFileSync(grandchildPidPath, "utf8"), 10);
+        expect(Number.isInteger(grandchildPid)).toBe(true);
+      } finally {
+        if (grandchildPid && isProcessAlive(grandchildPid)) {
+          process.kill(-grandchildPid, "SIGKILL");
         }
       }
     },

@@ -15,6 +15,7 @@ import {
 import { buildGuardedModelFetch } from "./host-policy.js";
 import { emitModelTransportDebug } from "./model-transport-debug.js";
 import { formatModelTransportDebugBaseUrl } from "./model-transport-url.js";
+import { suppressOpenAIResponsesCompaction } from "./openai-responses-compaction-replay.js";
 import {
   AZURE_RESPONSES_FIRST_EVENT_TIMEOUT_MS,
   type OpenAIResponsesOptions,
@@ -22,6 +23,7 @@ import {
 import {
   applyServiceTierPricing,
   logResponsesFailedNoDetails,
+  ResponsesStreamFailure,
   safeDebugValue,
   summarizeOpenAITransportError,
   summarizeResponsesPayload,
@@ -30,15 +32,13 @@ import {
   buildOpenAIResponsesParams,
   sanitizeOpenAICodexResponsesParams,
 } from "./openai-responses-params-internal.js";
+import { createResponsesPromptEgressObserver } from "./openai-responses-prompt-observer-internal.js";
 import {
   buildOpenAIResponsesReasoningReplayMetadata,
   createResponsesStreamWithEncryptedContentRetry,
   resolveAzureOpenAIApiVersion,
 } from "./openai-responses-replay-internal.js";
-import {
-  processResponsesStream,
-  ResponsesStreamFailure,
-} from "./openai-responses-stream-internal.js";
+import { processResponsesStream } from "./openai-responses-stream-internal.js";
 import { observeResponsesStream } from "./openai-responses-stream-observer-internal.js";
 import {
   assertCodeModeResponsesToolSurface,
@@ -56,6 +56,7 @@ import {
   mergeTransportMetadata,
   transportAbortError,
 } from "./transport-stream-shared.js";
+import { redactIdentifier } from "./transport-utils.js";
 
 function resolveProviderTransportTurnState(
   model: Model,
@@ -193,6 +194,10 @@ function createResponsesTransportExecutor(config: ResponsesTransportExecutorOpti
           enforceCodeModeResponsesToolSurface(params, visibleToolNames);
           assertCodeModeResponsesToolSurface(params, visibleToolNames);
         }
+        const observePrompt = createResponsesPromptEgressObserver(
+          responsesOptions,
+          context.systemPrompt,
+        );
         const requestStartedAt = Date.now();
         firstEventAbort = createFirstStreamEventAbortController(options?.signal);
         const requestOptions = buildOpenAISdkRequestOptions(model, firstEventAbort.signal, {
@@ -203,6 +208,7 @@ function createResponsesTransportExecutor(config: ResponsesTransportExecutorOpti
         emitModelTransportDebug(
           log,
           `[responses] start provider=${model.provider} api=${model.api} model=${model.id} ` +
+            `requestIdHash=${redactIdentifier(options?.requestId, { len: 64 })} ` +
             `baseUrl=${formatModelTransportDebugBaseUrl(model.baseUrl)} timeoutMs=${safeDebugValue(requestOptions?.timeout)} ` +
             `apiKey=${apiKey ? "present" : "missing"} ${summarizeResponsesPayload(params)}`,
         );
@@ -211,6 +217,12 @@ function createResponsesTransportExecutor(config: ResponsesTransportExecutorOpti
           request: params,
           requestOptions,
           model,
+          observePrompt,
+          onCompactionRejected: () =>
+            suppressOpenAIResponsesCompaction(output, model, {
+              sessionId: options?.sessionId,
+              authProfileId: responsesOptions?.authProfileId,
+            }),
         });
         await options?.onResponse?.(
           { status: response.status, headers: headersToRecord(response.headers) },
@@ -290,12 +302,7 @@ export function createAzureOpenAIResponsesTransportStreamFn(): StreamFn {
         resolveAzureDeploymentName(model),
         metadata,
       ),
-    createResponseStream: async ({ client, request, requestOptions }) => {
-      const { data, response } = await client.responses
-        .create(request as never, requestOptions)
-        .withResponse();
-      return { stream: data as unknown as AsyncIterable<unknown>, response };
-    },
+    createResponseStream: createResponsesStreamWithEncryptedContentRetry,
   });
 }
 

@@ -5,7 +5,9 @@ import type { readAcpSessionMeta } from "../../acp/runtime/session-meta.js";
 import { registerExecApprovalFollowupRuntimeHandoff } from "../../agents/bash-tools.exec-approval-followup-state.js";
 import { createAgentRunRestartAbortError } from "../../agents/run-termination.js";
 import {
+  addSubagentRunForTests,
   getSubagentRunByChildSessionKey,
+  listSubagentRunsForRequester,
   resetSubagentRegistryForTests,
 } from "../../agents/subagent-registry.test-helpers.js";
 import { getDetachedTaskLifecycleRuntime } from "../../tasks/detached-task-runtime.js";
@@ -368,14 +370,126 @@ describe("gateway agent handler", () => {
     });
   });
 
-  it("keeps plugin SDK subagent runs best-effort when registry persistence fails", async () => {
+  it("registers normally when a follow-up to a paused session names its own requester", async () => {
+    await withTempDir(
+      { prefix: "openclaw-gateway-plugin-subagent-own-requester-" },
+      async (root) => {
+        useTestStateDir(root);
+        resetSubagentRegistryForTests({ persist: false });
+        const childSessionKey = "agent:work:subagent:plugin-yield-own-requester";
+        const followUpRequester = {
+          sessionKey: "agent:main:telegram:direct:555",
+          origin: { channel: "telegram", to: "telegram:555", accountId: "work" },
+        } as const;
+        addSubagentRunForTests({
+          runId: "plugin-subagent-paused",
+          childSessionKey,
+          requesterSessionKey: "agent:main:telegram:direct:777",
+          requesterDisplayKey: "agent:main:telegram:direct:777",
+          task: "wait for the remote job",
+          endedAt: 2_000,
+          pauseReason: "sessions_yield",
+          expectsCompletionMessage: true,
+        });
+
+        await registerPluginSubagentRunFromGateway({
+          cfg: {
+            session: { mainKey: "main", scope: "per-sender" },
+            agents: { list: [{ id: "main", default: true }, { id: "work" }] },
+          },
+          runId: "plugin-subagent-own-requester",
+          childSessionKey,
+          task: "deliver to me instead",
+          requester: followUpRequester,
+          pluginId: "memory-core",
+        });
+
+        // An explicit requester is a delivery opt-in. Adopting the paused row here
+        // would drop that audience with nothing recording why, so the follow-up
+        // gets its own row and the paused run keeps its original requester.
+        const run = requireValue(
+          getSubagentRunByChildSessionKey(childSessionKey),
+          "expected separately registered plugin subagent run",
+        );
+        expectRecordFields(run, {
+          runId: "plugin-subagent-own-requester",
+          requesterSessionKey: followUpRequester.sessionKey,
+        });
+      },
+    );
+  });
+
+  it("still adopts the paused owner for a default follow-up after a requester-bound sibling", async () => {
+    await withTempDir(
+      { prefix: "openclaw-gateway-plugin-subagent-mixed-delivery-" },
+      async (root) => {
+        useTestStateDir(root);
+        resetSubagentRegistryForTests({ persist: false });
+        const childSessionKey = "agent:work:subagent:plugin-yield-mixed-delivery";
+        const originalRequester = "agent:main:telegram:direct:777";
+        const cfg = {
+          session: { mainKey: "main", scope: "per-sender" as const },
+          agents: { list: [{ id: "main", default: true }, { id: "work" }] },
+        };
+        addSubagentRunForTests({
+          runId: "plugin-subagent-paused",
+          childSessionKey,
+          requesterSessionKey: originalRequester,
+          requesterDisplayKey: originalRequester,
+          task: "wait for the remote job",
+          endedAt: 2_000,
+          pauseReason: "sessions_yield",
+          expectsCompletionMessage: true,
+        });
+
+        // A requester-bound follow-up lands at a higher generation than the paused
+        // owner, so it becomes the newest row for this session.
+        await registerPluginSubagentRunFromGateway({
+          cfg,
+          runId: "plugin-subagent-sibling",
+          childSessionKey,
+          task: "deliver to me instead",
+          requester: {
+            sessionKey: "agent:main:telegram:direct:555",
+            origin: { channel: "telegram", to: "telegram:555", accountId: "work" },
+          },
+          pluginId: "memory-core",
+        });
+
+        await registerPluginSubagentRunFromGateway({
+          cfg,
+          runId: "plugin-subagent-default-followup",
+          childSessionKey,
+          task: "the remote job finished",
+          pluginId: "memory-core",
+        });
+
+        // Adoption selects the newest *paused* row, not the newest row overall.
+        // Matching on generation alone would pick the sibling, decline adoption,
+        // and leave the original requester parked behind a row that can never
+        // announce. The sibling's own liveness is irrelevant to that choice.
+        const requesterRuns = listSubagentRunsForRequester(originalRequester);
+        expect(requesterRuns.map((entry) => entry.runId)).toEqual([
+          "plugin-subagent-default-followup",
+        ]);
+        expectRecordFields(requireValue(requesterRuns[0], "expected adopted run"), {
+          childSessionKey,
+          task: "the remote job finished",
+          pauseReason: undefined,
+        });
+      },
+    );
+  });
+
+  it("rejects plugin SDK subagent registration and adoption when persistence fails", async () => {
     await withTempDir(
       { prefix: "openclaw-gateway-plugin-subagent-registry-fail-" },
       async (root) => {
         useTestStateDir(root);
         resetAgentTaskRegistryForTests();
         resetSubagentRegistryForTests({ persist: false });
-        const persistSubagentRunsToDiskOrThrow = vi.fn(() => {
+        const persistSubagentRunsToDiskOrThrow = vi.fn();
+        persistSubagentRunsToDiskOrThrow.mockImplementationOnce(() => {
           throw new Error("disk full");
         });
         applyGatewaySubagentRegistryTestDeps({
@@ -412,6 +526,7 @@ describe("gateway agent handler", () => {
         const context = makeContext();
         const baseClient = requireValue(backendGatewayClient(), "expected backend client");
         const commandCallCount = mocks.agentCommand.mock.calls.length;
+        const respond = vi.fn();
 
         await invokeAgent(
           {
@@ -422,6 +537,7 @@ describe("gateway agent handler", () => {
           {
             context,
             reqId: runId,
+            respond,
             client: {
               connect: baseClient.connect,
               internal: {
@@ -434,19 +550,92 @@ describe("gateway agent handler", () => {
         );
 
         expect(persistSubagentRunsToDiskOrThrow).toHaveBeenCalledTimes(1);
-        expect(mocks.agentCommand).toHaveBeenCalledTimes(commandCallCount + 1);
-        await waitForAssertion(() => {
-          const task = requireValue(findTaskByRunId(runId), "expected fallback cli task");
-          expectRecordFields(task, {
-            runtime: "cli",
-            childSessionKey,
-            status: "succeeded",
-            terminalSummary: "completed",
-          });
-        });
+        expect(mocks.agentCommand).toHaveBeenCalledTimes(commandCallCount);
+        expect(findTaskByRunId(runId)).toBeUndefined();
+        const error = expectRespondError(respond, { code: ErrorCodes.UNAVAILABLE });
+        expectStringFieldContains(error, "message", "run was not started");
         expect(context.logGateway.warn).toHaveBeenCalledWith(
-          expect.stringContaining("falling back to cli task tracking"),
+          expect.stringContaining("rejecting untracked dispatch"),
         );
+
+        resetSubagentRegistryForTests({ persist: false });
+        const pausedRunId = "plugin-subagent-paused-before-persistence-failure";
+        addSubagentRunForTests({
+          runId: pausedRunId,
+          childSessionKey,
+          requesterSessionKey: "agent:main:telegram:direct:777",
+          requesterDisplayKey: "agent:main:telegram:direct:777",
+          task: "wait for the remote job",
+          endedAt: 2_000,
+          pauseReason: "sessions_yield",
+          expectsCompletionMessage: true,
+        });
+        persistSubagentRunsToDiskOrThrow.mockImplementationOnce(() => {
+          throw new Error("disk full during paused-run adoption");
+        });
+        const adoptionRunId = "plugin-subagent-adoption-registry-fail";
+        const adoptionRespond = vi.fn();
+        await invokeAgent(
+          {
+            message: "the remote job finished",
+            sessionKey: childSessionKey,
+            idempotencyKey: adoptionRunId,
+          },
+          {
+            context,
+            reqId: adoptionRunId,
+            respond: adoptionRespond,
+            client: {
+              connect: baseClient.connect,
+              internal: {
+                ...baseClient.internal,
+                agentRunTracking: "plugin_subagent",
+                pluginRuntimeOwnerId: "memory-core",
+              },
+            },
+          },
+        );
+
+        expect(mocks.agentCommand).toHaveBeenCalledTimes(commandCallCount);
+        expect(getSubagentRunByChildSessionKey(childSessionKey)).toMatchObject({
+          runId: pausedRunId,
+          pauseReason: "sessions_yield",
+        });
+        expect(getSubagentRunByChildSessionKey(childSessionKey)?.runId).not.toBe(adoptionRunId);
+        const adoptionError = expectRespondError(adoptionRespond, { code: ErrorCodes.UNAVAILABLE });
+        expectStringFieldContains(adoptionError, "message", "run was not started");
+
+        resetSubagentRegistryForTests({ persist: false });
+        const retryRunId = "plugin-subagent-registry-retry";
+        await invokeAgent(
+          {
+            message: "retry background plugin subagent task",
+            sessionKey: childSessionKey,
+            idempotencyKey: retryRunId,
+          },
+          {
+            context,
+            reqId: retryRunId,
+            client: {
+              connect: baseClient.connect,
+              internal: {
+                ...baseClient.internal,
+                agentRunTracking: "plugin_subagent",
+                pluginRuntimeOwnerId: "memory-core",
+              },
+            },
+          },
+        );
+
+        expect(persistSubagentRunsToDiskOrThrow.mock.calls.length).toBeGreaterThan(1);
+        await waitForAssertion(() => {
+          expect(mocks.agentCommand).toHaveBeenCalledTimes(commandCallCount + 1);
+          const retryRun = requireValue(
+            getSubagentRunByChildSessionKey(childSessionKey),
+            "expected retry plugin subagent run",
+          );
+          expect(retryRun.runId).toBe(retryRunId);
+        });
       },
     );
   });
@@ -820,6 +1009,43 @@ describe("gateway agent handler", () => {
         expect(
           context.dedupe.get("agent:task-registry-agent-run-abort-error")?.payload,
         ).not.toHaveProperty("timeoutPhase");
+      });
+    });
+  });
+
+  it("classifies an unsignaled AbortError task as cancelled without changing the error wire", async () => {
+    await withTempDir({ prefix: "openclaw-gateway-agent-task-plain-abort-" }, async (root) => {
+      useTestStateDir(root);
+      resetAgentTaskRegistryForTests();
+      primeMainAgentRun();
+      const abortError = new Error("This operation was aborted");
+      abortError.name = "AbortError";
+      const context = makeContext();
+      const runId = "task-registry-agent-run-plain-abort";
+      mocks.agentCommand.mockRejectedValueOnce(abortError);
+
+      await invokeAgent(
+        {
+          message: "background cli task",
+          sessionKey: "agent:main:main",
+          idempotencyKey: runId,
+        },
+        { context, reqId: runId },
+      );
+
+      await waitForAssertion(() => {
+        expectRecordFields(findTaskByRunId(runId), {
+          runtime: "cli",
+          childSessionKey: "agent:main:main",
+          status: "cancelled",
+          error: "AbortError: This operation was aborted",
+        });
+        expectRecordFields(context.dedupe.get(`agent:${runId}`)?.payload, {
+          runId,
+          status: "error",
+          summary: "AbortError: This operation was aborted",
+        });
+        expect(context.dedupe.get(`agent:${runId}`)?.ok).toBe(false);
       });
     });
   });
@@ -1378,6 +1604,7 @@ describe("gateway agent handler", () => {
           storePath: "/tmp/sessions.json",
         },
       );
+      vi.advanceTimersByTime(100);
       expect(broadcastToConnIds.mock.calls.map((callValue) => callValue[1]?.reason)).toEqual([
         "create",
         "send",
@@ -1728,6 +1955,7 @@ describe("gateway agent handler", () => {
           storePath: "/tmp/sessions.json",
         },
       );
+      vi.advanceTimersByTime(100);
       expect(broadcastToConnIds.mock.calls.map((callLocal) => callLocal[1]?.reason)).toEqual([
         "create",
         "send",

@@ -20,7 +20,7 @@ export type PluginConfigUiHint = {
 export type PluginFormat = "openclaw" | "bundle";
 
 /** Supported external bundle manifest formats. */
-export type PluginBundleFormat = "codex" | "claude" | "cursor";
+export type PluginBundleFormat = "agent" | "codex" | "claude" | "cursor";
 
 /**
  * Closed classification codes for plugin diagnostics. Health surfaces branch
@@ -147,7 +147,6 @@ export type PluginManifestSecretProviderIntegration = {
   jsonOnly?: boolean;
   env?: Record<string, string>;
   passEnv?: string[];
-  allowInsecurePath?: boolean;
 };
 
 export type PluginManifestActivationCapability = "provider" | "channel" | "tool" | "hook";
@@ -224,6 +223,14 @@ export type PluginManifestSetup = {
    * Defaults to false when omitted.
    */
   requiresRuntime?: boolean;
+};
+
+export type PluginManifestDoctorContract = {
+  legacyConfigRules?: boolean;
+  normalizeCompatibilityConfig?: boolean;
+  resolveSessionStoreAgentIds?: boolean;
+  sessionRouteStateOwners?: boolean;
+  stateMigrations?: boolean;
 };
 
 export type PluginManifestQaRunner = {
@@ -385,6 +392,8 @@ export type PluginManifest = {
   activation?: PluginManifestActivation;
   /** Cheap setup/onboarding metadata exposed before plugin runtime loads. */
   setup?: PluginManifestSetup;
+  /** Doctor contract surfaces available without loading the plugin artifact. */
+  doctorContract?: PluginManifestDoctorContract;
   /** Cheap QA runner metadata exposed before plugin runtime loads. */
   qaRunners?: PluginManifestQaRunner[];
   /** Widget data and action capabilities validated against runtime registrations. */

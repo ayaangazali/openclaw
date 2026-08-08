@@ -17,6 +17,7 @@ import {
   type PromptCacheBreak,
   type PromptCacheChange,
 } from "../prompt-cache-observability.js";
+import { joinWithRunLivenessDeadline, RUN_LIVENESS_JOIN_TIMEOUT_MS } from "./abortable.js";
 import {
   flushSessionManagerTranscript,
   normalizeCompactionRecoveryTranscriptTail,
@@ -191,7 +192,19 @@ export async function settleEmbeddedAttemptStream(input: {
         !input.readLifecycleState().timedOut &&
         !state.yieldAborted &&
         currentAssistant?.stopReason === "stop";
-      await input.onBlockReplyFlush({ reason: "pre_compaction", attemptAccepted });
+      // The flush rides the same delivery chain the finalize-phase join just
+      // bounded; a wedged lane (including the supported blockReplyTimeoutMs: 0
+      // path) must not park settlement until the 48h run budget either.
+      await joinWithRunLivenessDeadline({
+        joinWork: () => input.onBlockReplyFlush?.({ reason: "pre_compaction", attemptAccepted }),
+        runAbortSignal: input.runAbortSignal,
+        onTimeout: () => {
+          log.warn(
+            `block-reply flush did not settle within ${RUN_LIVENESS_JOIN_TIMEOUT_MS}ms; ` +
+              `proceeding with settlement: runId=${attempt.runId}`,
+          );
+        },
+      });
     }
 
     const compactionRetryWait = state.yieldAborted
@@ -280,17 +293,20 @@ export async function settleEmbeddedAttemptStream(input: {
           `runId=${attempt.runId} sessionId=${attempt.sessionId}`,
       );
     }
+    const modelMessagesSnapshot = snapshotSelection.messagesSnapshot;
     messagesSnapshot = projectToolSearchTargetTranscriptMessages(
-      snapshotSelection.messagesSnapshot,
+      modelMessagesSnapshot,
       input.toolSearchTargetTranscriptProjections,
     );
     sessionIdUsed = snapshotSelection.sessionIdUsed;
-    lastAssistant = messagesSnapshot
+    // Projected target-tool assistants are transcript evidence, not model
+    // turns. Letting one own terminal state hides its parent tool's outcome.
+    lastAssistant = modelMessagesSnapshot
       .slice()
       .toReversed()
       .find((message): message is AssistantMessage => message.role === "assistant");
     currentAttemptAssistant = findCurrentAttemptAssistantMessage({
-      messagesSnapshot,
+      messagesSnapshot: modelMessagesSnapshot,
       prePromptMessageCount: input.prePromptMessageCount,
     });
     currentAttemptCompletedAssistant = subscription.getCurrentAttemptAssistant();

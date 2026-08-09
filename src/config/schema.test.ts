@@ -2,6 +2,7 @@ import { SENSITIVE_URL_HINT_TAG } from "@openclaw/net-policy/redact-sensitive-ur
 // Covers canonical config schema defaults, validation, and sensitive redaction.
 import { expectDefined } from "@openclaw/normalization-core";
 import { beforeAll, describe, expect, it } from "vitest";
+import { z } from "zod";
 import { buildConfigSchemaCore, lookupConfigSchema } from "./schema.js";
 import { applyDerivedTags } from "./schema.tags.js";
 import { applyResolvedConfigTierHints } from "./schema.tiers.js";
@@ -10,34 +11,33 @@ import { ToolsSchema } from "./zod-schema.agent-runtime.js";
 import { OpenClawSchema } from "./zod-schema.js";
 
 describe("config schema", () => {
-  it("keeps the core channels keys that ChannelsSchema owns", () => {
+  it("keeps every core channels key that ChannelsSchema owns", () => {
     // `channels` mixes plugin channel entries with core keys. The strip that
     // clears per-channel entries used to take these with it, so they vanished
-    // from the schema surface while the runtime still accepted them.
+    // from the schema surface while the runtime still accepted them. Assert
+    // parity with the core schema rather than a key list, so a new core field
+    // cannot reintroduce the bug by being forgotten here.
+    const coreChannels = z.toJSONSchema(OpenClawSchema, {
+      target: "draft-07",
+      unrepresentable: "any",
+    }) as { properties?: { channels?: { properties?: Record<string, unknown> } } };
+    const coreKeys = Object.keys(
+      expectDefined(coreChannels.properties?.channels, "core channels schema node").properties ??
+        {},
+    );
     const schema = baseSchema.schema as { properties?: Record<string, unknown> };
     const channels = expectDefined(schema.properties?.channels, "channels schema node") as {
       properties?: Record<string, unknown>;
     };
-    expect(Object.keys(channels.properties ?? {})).toEqual(
-      expect.arrayContaining(["defaults", "modelByChannel"]),
-    );
-    const defaults = expectDefined(
-      channels.properties?.defaults,
-      "channels.defaults schema node",
-    ) as { properties?: Record<string, unknown> };
-    expect(Object.keys(defaults.properties ?? {})).toEqual(
-      expect.arrayContaining([
-        "groupPolicy",
-        "contextVisibility",
-        "heartbeatVisibility",
-        "botLoopProtection",
-        "implicitMentions",
-      ]),
-    );
+
+    // The built schema also carries plugin channel entries, so assert every core
+    // key survived rather than exact equality.
+    expect(coreKeys.length).toBeGreaterThan(0);
+    expect(Object.keys(channels.properties ?? {})).toEqual(expect.arrayContaining(coreKeys));
   });
 
-  type SchemaInput = NonNullable<Parameters<typeof buildConfigSchema>[0]>;
-  let baseSchema: ReturnType<typeof buildConfigSchema>;
+  type SchemaInput = NonNullable<Parameters<typeof buildConfigSchemaCore>[0]>;
+  let baseSchema: ReturnType<typeof buildConfigSchemaCore>;
 
   type SchemaInput = NonNullable<Parameters<typeof buildConfigSchemaCore>[0]>;
   let baseSchema: ReturnType<typeof buildConfigSchemaCore>;

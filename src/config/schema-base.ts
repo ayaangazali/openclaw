@@ -103,9 +103,6 @@ type BaseConfigSchemaResponse = {
 
 type BaseConfigSchemaStablePayload = Omit<BaseConfigSchemaResponse, "generatedAt">;
 
-/** Keys `ChannelsSchema` owns directly; everything else under `channels` is a channel id. */
-const CORE_CHANNEL_SCHEMA_KEYS = new Set(["defaults", "modelByChannel"]);
-
 function stripChannelSchema(schema: ConfigSchema): ConfigSchema {
   const next = cloneSchema(schema);
   const root = asSchemaObject(next);
@@ -120,17 +117,10 @@ function stripChannelSchema(schema: ConfigSchema): ConfigSchema {
   }
   const channelsNode = asSchemaObject(root.properties.channels);
   if (channelsNode) {
-    // Per-channel entries are re-added from plugin metadata after this strip, but
-    // the core keys ChannelsSchema declares have no plugin to restore them.
-    // Dropping them here removed them from every generated surface (Control UI
-    // form, `config schema`, doc baseline) while the runtime still accepted them.
-    const preserved: NonNullable<JsonSchemaObject["properties"]> = {};
-    for (const [key, value] of Object.entries(channelsNode.properties ?? {})) {
-      if (CORE_CHANNEL_SCHEMA_KEYS.has(key)) {
-        preserved[key] = value;
-      }
-    }
-    channelsNode.properties = preserved;
+    // Everything declared here comes from ChannelsSchema; per-channel entries are
+    // merged in later from plugin metadata. Clearing the map dropped the core keys
+    // from every generated surface (Control UI form, `config schema`, doc baseline)
+    // while the runtime still accepted them, so keep what the core schema owns.
     channelsNode.required = [];
     channelsNode.additionalProperties = true;
   }

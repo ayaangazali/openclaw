@@ -3,7 +3,10 @@ import {
   createChannelInboundEnvelopeBuilder,
   recordChannelBotPairLoopAndCheckSuppression,
 } from "openclaw/plugin-sdk/channel-inbound";
-import { deriveDurableFinalDeliveryRequirements } from "openclaw/plugin-sdk/channel-outbound";
+import {
+  createChannelMessageReplyPipeline,
+  deriveDurableFinalDeliveryRequirements,
+} from "openclaw/plugin-sdk/channel-outbound";
 /**
  * Converts authorized ClickClack messages into OpenClaw agent/model replies and
  * routes resulting outbound text back to ClickClack.
@@ -64,13 +67,33 @@ async function dispatchModelReply(params: {
       },
     ],
   });
-  const text = result.text.trim();
-  if (!text) {
+  const completion = result.text.trim();
+  if (!completion) {
     runtime.logging
       .getChildLogger({ plugin: "clickclack", feature: "model-reply" })
       .warn(`[${params.account.accountId}] ClickClack model reply produced no sendable text`);
     return;
   }
+  // Model mode sends the completion straight to ClickClack instead of going
+  // through the agent reply pipeline, so it has to resolve the configured
+  // prefix itself or `responsePrefix` is accepted and never rendered. The
+  // pipeline owns template resolution; only the concatenation is local, and a
+  // fresh completion can never already carry the prefix the way a round-tripped
+  // agent reply can, so the shared startsWith guard has nothing to dedupe here.
+  const replyPipeline = createChannelMessageReplyPipeline({
+    cfg: params.cfg,
+    agentId: params.route.agentId,
+    channel: CHANNEL_ID,
+    accountId: params.account.accountId,
+  });
+  replyPipeline.onModelSelected?.({
+    provider: result.provider,
+    model: result.model,
+    // Model mode runs a single completion with no thinking-level negotiation.
+    thinkLevel: undefined,
+  });
+  const responsePrefix = replyPipeline.resolveResponsePrefix?.();
+  const text = responsePrefix ? `${responsePrefix} ${completion}` : completion;
   await sendClickClackText({
     cfg: params.cfg as CoreConfig,
     accountId: params.account.accountId,

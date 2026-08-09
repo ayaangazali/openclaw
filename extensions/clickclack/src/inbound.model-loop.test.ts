@@ -59,6 +59,76 @@ function createAccount(): ResolvedClickClackAccount {
   };
 }
 
+describe("ClickClack direct-model response prefix", () => {
+  beforeEach(() => {
+    sendClickClackTextMock.mockClear();
+  });
+
+  // Model mode bypasses the agent reply pipeline, so the documented
+  // responsePrefix has to be resolved on this path or it is accepted and never
+  // rendered. The templated case pins that the selected model reaches the
+  // prefix context, which a plain string prefix would not prove.
+  it("renders root, account, and templated prefixes on model replies", async () => {
+    const cases = [
+      {
+        label: "root",
+        cfg: { channels: { clickclack: { responsePrefix: "[bot]" } } },
+        expected: "[bot] service bot online",
+      },
+      {
+        label: "account",
+        cfg: {
+          channels: {
+            clickclack: {
+              responsePrefix: "[root]",
+              accounts: { "model-loop-account": { responsePrefix: "[svc]" } },
+            },
+          },
+        },
+        expected: "[svc] service bot online",
+      },
+      {
+        label: "templated",
+        cfg: { channels: { clickclack: { responsePrefix: "[{model}]" } } },
+        expected: "[gpt-5.4-mini] service bot online",
+      },
+    ];
+
+    for (const testCase of cases) {
+      sendClickClackTextMock.mockClear();
+      setClickClackRuntime(createRuntime());
+      const message = {
+        id: "msg_01arz3ndektsv4rrffq69g5fca",
+        workspace_id: "wsp_model_loop",
+        direct_conversation_id: "dm_model_prefix",
+        author_id: "usr_model_sender",
+        thread_root_id: "msg_01arz3ndektsv4rrffq69g5fca",
+        body: "hello bot",
+        body_format: "markdown" as const,
+        created_at: "2026-05-09T12:00:00.000Z",
+        author: {
+          id: "usr_model_sender",
+          kind: "human" as const,
+          display_name: "Model sender",
+          handle: "model-sender",
+          avatar_url: "",
+          created_at: "2026-05-09T12:00:00.000Z",
+        },
+      } satisfies ClickClackMessage;
+
+      await handleClickClackInbound({
+        account: createAccount(),
+        config: testCase.cfg as unknown as CoreConfig,
+        message,
+      });
+
+      expect(sendClickClackTextMock.mock.calls[0]?.[0]?.text, testCase.label).toBe(
+        testCase.expected,
+      );
+    }
+  });
+});
+
 describe("ClickClack direct-model bot loop protection", () => {
   beforeEach(() => {
     sendClickClackTextMock.mockClear();

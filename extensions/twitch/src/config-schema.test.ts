@@ -30,6 +30,34 @@ describe("TwitchConfigSchema JSON schema", () => {
     ).toBe(true);
   });
 
+  it("accepts the root responsePrefix override in both union branches", () => {
+    // Both branches are closed, so a key present in only one is rejected outright
+    // for configs that can match the other.
+    expect(
+      validateTwitchConfig({
+        responsePrefix: "[bot]",
+        username: "openclaw",
+        accessToken: "oauth:test",
+        clientId: "test-client-id",
+        channel: "openclaw-test",
+      }),
+    ).toBe(true);
+    expect(
+      validateTwitchConfig({
+        responsePrefix: "[bot]",
+        accounts: {
+          stream: {
+            username: "openclaw",
+            accessToken: "oauth:test",
+            clientId: "test-client-id",
+            channel: "openclaw-test",
+            responsePrefix: "[stream]",
+          },
+        },
+      }),
+    ).toBe(true);
+  });
+
   it("accepts multi-account channel config with defaultAccount", () => {
     expect(
       validateTwitchConfig({

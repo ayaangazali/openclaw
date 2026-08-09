@@ -4408,9 +4408,11 @@ describe("chat attachment picker", () => {
     expect(container.querySelector(".chat-attachment-file__name")?.textContent).toContain(
       "First words from a l...",
     );
-    expect(container.querySelector(".chat-attachment-text-action")?.textContent).toContain(
-      "Restore",
-    );
+    // The action returns the staged text to the composer for editing; it used to
+    // borrow the worktrees "Restore" string, which described a different feature.
+    const textAction = container.querySelector(".chat-attachment-text-action");
+    expect(textAction?.textContent).toContain("Edit as text");
+    expect(textAction?.getAttribute("aria-label")).toBe("Edit as text");
   });
 
   it("keeps large paste previews UTF-16 well-formed at the display boundary", () => {
@@ -4469,8 +4471,8 @@ describe("chat attachment picker", () => {
     );
     const showButton = requireElement(
       preview,
-      '[aria-label="Restore"]',
-      "show pasted text button",
+      '[aria-label="Edit as text"]',
+      "edit as text button",
     ) as HTMLButtonElement;
 
     showButton.click();

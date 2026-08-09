@@ -4300,7 +4300,7 @@ describe("createTelegramBot", () => {
     expect(replySpy).not.toHaveBeenCalled();
   });
 
-  it("hydrates reply chains from cached Telegram messages", async () => {
+  it("reuses resolved media when hydrating cached Telegram reply chains", async () => {
     const mediaFetch = vi.fn(
       async () =>
         new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), {
@@ -4323,7 +4323,7 @@ describe("createTelegramBot", () => {
           message_id: 9000,
           date: 1736380700,
           from: { id: 1, first_name: "Kesava" },
-          photo: [{ file_id: "root-photo-1" }],
+          photo: [{ file_id: "root-photo-1", file_unique_id: "root-photo-unique-1" }],
         },
         me: { username: "openclaw_bot" },
         getFile: async () => ({ file_path: "media/root.jpg" }),
@@ -4338,7 +4338,7 @@ describe("createTelegramBot", () => {
           from: { id: 2, first_name: "Ada" },
           reply_to_message: {
             message_id: 9000,
-            photo: [{ file_id: "root-photo-1" }],
+            photo: [{ file_id: "root-photo-1", file_unique_id: "root-photo-unique-1" }],
             from: { id: 1, first_name: "Kesava" },
           },
         },
@@ -4392,7 +4392,7 @@ describe("createTelegramBot", () => {
     expect(payload.ReplyChain?.[0]?.replyToId).toBe("9000");
     expect(payload.ReplyChain?.[1]?.messageId).toBe("9000");
     expect(payload.ReplyChain?.[1]?.mediaPath).toBeTypeOf("string");
-    expect(payload.ReplyChain?.[1]?.mediaPath).toContain("/media/inbound/");
+    expect(payload.ReplyChain?.[1]?.mediaPath).toMatch(/^media:\/\/inbound\//);
     expect(payload.ReplyChain?.[1]?.mediaRef).toBeUndefined();
     const [conversationContext] = requireArray(
       payload.ChannelStructuredContext,
@@ -4408,10 +4408,10 @@ describe("createTelegramBot", () => {
       sender: "Kesava",
     });
     expect(messagesById.get("9000")?.media_path).toMatch(/^media:\/\/inbound\//);
-    expect(messagesById.get("9000")?.media_path).not.toBe(payload.ReplyChain?.[1]?.mediaPath);
+    expect(messagesById.get("9000")?.media_path).toBe(payload.ReplyChain?.[1]?.mediaPath);
     expect(messagesById.get("9000")?.media_ref).toBeUndefined();
-    expect(getFileSpy).toHaveBeenCalledWith("root-photo-1", expect.any(AbortSignal));
-    expect(mediaFetch).toHaveBeenCalledTimes(1);
+    expect(getFileSpy).not.toHaveBeenCalled();
+    expect(mediaFetch).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -4470,6 +4470,9 @@ describe("createTelegramBot", () => {
         },
       });
 
+      expect(getFileSpy).toHaveBeenCalledWith("generated-photo-1", expect.any(AbortSignal));
+      expect(mediaFetch).toHaveBeenCalledTimes(1);
+
       replySpy.mockClear();
       getFileSpy.mockClear();
       mediaFetch.mockClear();
@@ -4518,7 +4521,7 @@ describe("createTelegramBot", () => {
     });
     if (expectHydrated) {
       expect(payload.ReplyChain?.[1]?.mediaPath).toBeTypeOf("string");
-      expect(payload.ReplyChain?.[1]?.mediaPath).toContain("/media/inbound/");
+      expect(payload.ReplyChain?.[1]?.mediaPath).toMatch(/^media:\/\/inbound\//);
       expect(payload.ReplyChain?.[1]?.mediaRef).toBeUndefined();
     } else {
       expect(payload.ReplyChain?.[1]?.mediaPath).toBeUndefined();
@@ -4552,13 +4555,8 @@ describe("createTelegramBot", () => {
       reply_to_id: "101",
       is_reply_target: true,
     });
-    if (expectHydrated) {
-      expect(getFileSpy).toHaveBeenCalledWith("generated-photo-1", expect.any(AbortSignal));
-      expect(mediaFetch).toHaveBeenCalledTimes(1);
-    } else {
-      expect(getFileSpy).not.toHaveBeenCalled();
-      expect(mediaFetch).not.toHaveBeenCalled();
-    }
+    expect(getFileSpy).not.toHaveBeenCalled();
+    expect(mediaFetch).not.toHaveBeenCalled();
   });
 
   it("does not hydrate reply media denied by General forum topic visibility", async () => {

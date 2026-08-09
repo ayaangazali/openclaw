@@ -17,7 +17,10 @@ import {
   isTelegramHistoryEntryAfterAmbientWatermark,
   isTelegramSelfSenderName,
 } from "./group-history-window.js";
-import { resolveTelegramMessageCacheScope } from "./message-cache-persistence.js";
+import {
+  resolveTelegramMessageCacheScope,
+  type TelegramResolvedMedia,
+} from "./message-cache-persistence.js";
 import {
   buildTelegramConversationContext,
   buildTelegramReplyChain,
@@ -91,6 +94,19 @@ export function createTelegramMessageContextRuntime({
       ...(botUserId !== undefined ? { botUserId } : {}),
       ...(threadId != null ? { providerObservedThreadId: threadId } : {}),
       ...(threadId != null ? { threadId } : {}),
+    });
+
+  const recordMessageResolvedMedia = (params: {
+    msg: Message;
+    media: TelegramResolvedMedia;
+    botUserId?: number;
+  }) =>
+    messageCache.recordResolvedMedia({
+      accountId,
+      chatId: params.msg.chat.id,
+      messageId: String(params.msg.message_id),
+      media: params.media,
+      ...(params.botUserId !== undefined ? { botUserId: params.botUserId } : {}),
     });
 
   // `MessageReactionUpdated` carries no `message_thread_id`, so the reaction handler
@@ -272,6 +288,7 @@ export function createTelegramMessageContextRuntime({
 
   return {
     recordMessageForReplyChain,
+    recordMessageResolvedMedia,
     resolveCachedMessageThreadId,
     buildReplyChainForMessage,
     toReplyChainEntry,

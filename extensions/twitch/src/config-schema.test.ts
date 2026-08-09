@@ -46,4 +46,32 @@ describe("TwitchConfigSchema JSON schema", () => {
       }),
     ).toBe(true);
   });
+
+  it("accepts the root historyLimit override in both union branches", () => {
+    // Both branches are closed, so a key present in only one is rejected outright
+    // for configs that can match the other.
+    expect(
+      validateTwitchConfig({
+        historyLimit: 5,
+        username: "openclaw",
+        accessToken: "oauth:test",
+        clientId: "test-client-id",
+        channel: "openclaw-test",
+      }),
+    ).toBe(true);
+    expect(
+      validateTwitchConfig({
+        historyLimit: 5,
+        accounts: {
+          stream: {
+            username: "openclaw",
+            accessToken: "oauth:test",
+            clientId: "test-client-id",
+            channel: "openclaw-test",
+            historyLimit: 10,
+          },
+        },
+      }),
+    ).toBe(true);
+  });
 });

@@ -1,4 +1,6 @@
 // Qa Channel type declarations define plugin contracts.
+import type { ReplyToMode } from "openclaw/plugin-sdk/config-contracts";
+
 type QaChannelActionConfig = {
   messages?: boolean;
   reactions?: boolean;
@@ -9,6 +11,7 @@ type QaChannelActionConfig = {
 export type QaChannelAccountConfig = {
   name?: string;
   enabled?: boolean;
+  replyToMode?: ReplyToMode;
   baseUrl?: string;
   botUserId?: string;
   botDisplayName?: string;

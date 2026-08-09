@@ -4,6 +4,7 @@
 import type {
   ChannelBotLoopProtectionConfig,
   OpenClawConfig,
+  ReplyToMode,
 } from "openclaw/plugin-sdk/config-contracts";
 import type { tryReadSecretFileSync } from "openclaw/plugin-sdk/secret-file-runtime";
 
@@ -27,6 +28,7 @@ export type ClickClackGroupConfig = {
 export type ClickClackAccountConfig = {
   name?: string;
   enabled?: boolean;
+  replyToMode?: ReplyToMode;
   baseUrl?: string;
   apiBaseUrl?: string;
   token?: unknown;

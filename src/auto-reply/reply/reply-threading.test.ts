@@ -162,6 +162,33 @@ describe("resolveReplyToMode", () => {
     expect(resolveReplyToMode(cfg, "irc", "missing", "channel")).toBe("off");
     expect(resolveReplyToMode(cfg, "irc", null, "channel")).toBe("off");
   });
+
+  it("matches a human-form account key against the canonicalized routed id", () => {
+    // Routing hands this resolver canonical ids, so a preserved config key like
+    // "Ops Team" must still match "ops-team" or the override is silently dropped.
+    setActivePluginRegistry(createTestRegistry([]));
+    const cfg = {
+      channels: {
+        irc: {
+          replyToMode: "off",
+          replyToModeByChatType: { channel: "off" },
+          accounts: {
+            "Ops Team": {
+              replyToMode: "all",
+              replyToModeByChatType: { channel: "first" },
+            },
+          },
+        },
+      },
+    } as unknown as OpenClawConfig;
+
+    for (const accountId of ["ops-team", "Ops Team", "OPS TEAM"]) {
+      expect(resolveReplyToMode(cfg, "irc", accountId, "channel")).toBe("first");
+      expect(resolveReplyToMode(cfg, "irc", accountId, "direct")).toBe("all");
+    }
+    // An unrelated account still falls back to the root mode.
+    expect(resolveReplyToMode(cfg, "irc", "other-team", "channel")).toBe("off");
+  });
 });
 
 describe("createReplyToModeFilterForChannel", () => {

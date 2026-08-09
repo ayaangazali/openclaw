@@ -7,7 +7,8 @@ import { normalizeAnyChannelId } from "../../channels/registry.js";
 import { getLoadedChannelThreadingAdapter } from "../../channels/thread-addressing.js";
 import type { ReplyToMode } from "../../config/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import { DEFAULT_ACCOUNT_ID } from "../../routing/account-id.js";
+import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "../../routing/account-id.js";
+import { resolveNormalizedAccountEntry } from "../../routing/account-lookup.js";
 import {
   copyReplyPayloadMetadata,
   isReplyPayloadStatusNotice,
@@ -48,8 +49,17 @@ function resolveConfiguredReplyToMode(
   // Channels that register a threading adapter resolve account scope themselves;
   // this generic fallback serves the rest, which still accept accounts.<id> in
   // their schema, so the account value must win here or it is silently ignored.
+  // Routed account ids arrive canonicalized, so an exact-key lookup misses a
+  // preserved config key like "Ops Team" and silently falls back to the root
+  // mode. Normalize both sides, the same way streaming resolution does.
   const trimmedAccountId = accountId?.trim();
-  const accountConfig = trimmedAccountId ? channelConfig?.accounts?.[trimmedAccountId] : undefined;
+  const accountConfig = trimmedAccountId
+    ? resolveNormalizedAccountEntry(
+        channelConfig?.accounts,
+        normalizeAccountId(trimmedAccountId),
+        normalizeAccountId,
+      )
+    : undefined;
   const normalizedChatType = normalizeReplyToModeChatType(chatType);
   if (normalizedChatType) {
     const scopedMode =

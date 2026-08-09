@@ -2,7 +2,7 @@ import { createAccountListHelpers } from "openclaw/plugin-sdk/account-helpers";
 // Tlon type declarations define plugin contracts.
 import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "openclaw/plugin-sdk/account-resolution";
 import type { ResolvedChannelImplicitMentions } from "openclaw/plugin-sdk/channel-ingress-runtime";
-import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import type { OpenClawConfig, ReplyToMode } from "openclaw/plugin-sdk/config-contracts";
 import {
   hasLegacyFlatAllowPrivateNetworkAlias,
   isPrivateNetworkOptInEnabled,
@@ -11,6 +11,7 @@ import {
 type TlonAccountConfig = {
   name?: string;
   enabled?: boolean;
+  replyToMode?: ReplyToMode;
   ship?: string;
   url?: string;
   code?: string;

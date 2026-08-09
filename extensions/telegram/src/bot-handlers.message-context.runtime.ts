@@ -109,6 +109,29 @@ export function createTelegramMessageContextRuntime({
       ...(params.botUserId !== undefined ? { botUserId: params.botUserId } : {}),
     });
 
+  const recordReplyMessageResolvedMedia = async (params: {
+    chatId: string | number;
+    messageId: string;
+    media: TelegramResolvedMedia;
+    botUserId?: number;
+  }) => {
+    const cachedNode = await messageCache.get({
+      accountId,
+      chatId: params.chatId,
+      messageId: params.messageId,
+    });
+    if (!cachedNode) {
+      return;
+    }
+    await messageCache.recordResolvedMedia({
+      accountId,
+      chatId: params.chatId,
+      messageId: params.messageId,
+      media: params.media,
+      ...(params.botUserId !== undefined ? { botUserId: params.botUserId } : {}),
+    });
+  };
+
   // `MessageReactionUpdated` carries no `message_thread_id`, so the reaction handler
   // recovers the originating topic from the same bounded cache that records inbound
   // and outbound messages. `undefined` means "thread unknown", never "General": the
@@ -290,6 +313,7 @@ export function createTelegramMessageContextRuntime({
   return {
     recordMessageForReplyChain,
     recordMessageResolvedMedia,
+    recordReplyMessageResolvedMedia,
     resolveCachedMessageThreadId,
     buildReplyChainForMessage,
     toReplyChainEntry,

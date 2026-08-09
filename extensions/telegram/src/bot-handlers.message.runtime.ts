@@ -109,6 +109,7 @@ export function createTelegramHandlerMessageRuntime({
   const {
     recordMessageForReplyChain,
     recordMessageResolvedMedia,
+    recordReplyMessageResolvedMedia,
     resolveCachedMessageThreadId,
     buildReplyChainForMessage,
     toReplyChainEntry,
@@ -175,17 +176,18 @@ export function createTelegramHandlerMessageRuntime({
               ...mediaRuntime,
             });
             if (media) {
-              await recordMessageResolvedMedia({
-                msg: node.sourceMessage,
-                media,
-                botUserId: ctx.me?.id,
-              });
               mediaRef = {
                 path: media.path,
                 kind: media.kind,
                 ...(media.contentType ? { contentType: media.contentType } : {}),
                 ...(media.stickerMetadata ? { stickerMetadata: media.stickerMetadata } : {}),
               };
+              await recordReplyMessageResolvedMedia({
+                chatId: ctx.message.chat.id,
+                messageId: node.messageId,
+                media,
+                botUserId: ctx.me?.id,
+              });
             }
           }
         } catch (err) {

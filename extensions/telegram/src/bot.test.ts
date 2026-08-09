@@ -5066,6 +5066,59 @@ describe("createTelegramBot", () => {
     expect((payload as Record<string, unknown>).ReplyToIsExternal).toBe(true);
   });
 
+  it("keeps fetched media for uncached external replies", async () => {
+    const mediaFetch = vi.fn(
+      async () =>
+        new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), {
+          status: 200,
+          headers: { "content-type": "image/png" },
+        }),
+    );
+    const ssrfMock = mockPinnedHostnameResolution();
+
+    try {
+      createTelegramBot({
+        token: "tok",
+        telegramTransport: makeTelegramTransport(mediaFetch as typeof fetch),
+      });
+      const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
+
+      await handler({
+        message: {
+          chat: { id: 7, type: "private" },
+          text: "What is in this image?",
+          date: 1736380800,
+          external_reply: {
+            origin: {
+              type: "user",
+              sender_user: { id: 22, is_bot: false, first_name: "Ada" },
+              date: 1736380700,
+            },
+            chat: { id: -10022, type: "supergroup", title: "Source" },
+            message_id: 9003,
+            photo: [{ file_id: "external-photo-1" }],
+          },
+        },
+        me: { username: "openclaw_bot" },
+        getFile: getEmptyTelegramFile,
+      });
+    } finally {
+      ssrfMock.mockRestore();
+    }
+
+    expect(replySpy).toHaveBeenCalledTimes(1);
+    const payload = mockMsgContextArg(
+      replySpy as unknown as MockCallSource,
+      0,
+      0,
+      "replySpy call",
+    ) as { ReplyChain?: Array<{ messageId?: string; mediaPath?: string }> };
+    expect(payload.ReplyChain?.[0]).toMatchObject({ messageId: "9003" });
+    expect(payload.ReplyChain?.[0]?.mediaPath).toBeTypeOf("string");
+    expect(getFileSpy).toHaveBeenCalledWith("external-photo-1", expect.any(AbortSignal));
+    expect(mediaFetch).toHaveBeenCalledTimes(1);
+  });
+
   it("propagates forwarded origin from external_reply targets", async () => {
     onSpy.mockReset();
     sendMessageSpy.mockReset();

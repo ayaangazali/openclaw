@@ -4394,6 +4394,7 @@ describe("createTelegramBot", () => {
     expect(payload.ReplyChain?.[1]?.mediaPath).toBeTypeOf("string");
     expect(payload.ReplyChain?.[1]?.mediaPath).toMatch(/^media:\/\/inbound\//);
     expect(payload.ReplyChain?.[1]?.mediaRef).toBeUndefined();
+    expect(payload.ReplyChain?.[1]).not.toHaveProperty("resolvedMedia");
     const [conversationContext] = requireArray(
       payload.ChannelStructuredContext,
       "structured context",

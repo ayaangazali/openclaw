@@ -135,6 +135,7 @@ export function createTelegramMessageContextRuntime({
   ): TelegramReplyChainEntry => {
     const {
       sourceMessage: _sourceMessage,
+      resolvedMedia: _resolvedMedia,
       promptContextProjectionMarker: _promptContextProjectionMarker,
       threadBinding: _threadBinding,
       ...entry

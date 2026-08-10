@@ -330,7 +330,7 @@ Built-in commands intercepted before the AI queue:
 | `/bot-help`          | —         | any          | List all commands                                                              |
 | `/bot-me`            | —         | private only | Show the sender's QQ user ID (openid) for `allowFrom` / `groupAllowFrom` setup |
 | `/bot-version`       | —         | private only | Show the OpenClaw framework version and plugin version                         |
-| `/bot-upgrade`       | —         | private only | Show the QQBot upgrade guide link                                              |
+| `/bot-upgrade`       | —         | private only | Show the QQBot upgrade guide link (see `upgradeUrl` below)                     |
 | `/bot-approve`       | allowlist | private only | Manage command-execution approval config (on / off / always / reset / status)  |
 | `/bot-logs`          | allowlist | private only | Export recent gateway logs as a file                                           |
 | `/bot-clear-storage` | allowlist | private only | Delete cached downloads under the QQBot media directory                        |
@@ -348,6 +348,11 @@ silently dropping the message.
 
 `/bot-me`, `/bot-version`, and `/bot-upgrade` are private-chat-only but do not
 require the allowlist — any C2C sender can run them.
+
+`/bot-upgrade` returns the `upgradeUrl` configured for the account that received
+the command. The key is accepted at `channels.qqbot.upgradeUrl` and at
+`channels.qqbot.accounts.<id>.upgradeUrl`. Leave it unset to keep the bundled
+OpenClaw upgrade guide link.
 
 When QQ Bot exec approvals use the default same-chat fallback, native approval
 button clicks follow the same explicit non-wildcard command allowlist. To

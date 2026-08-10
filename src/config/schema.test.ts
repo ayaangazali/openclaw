@@ -2,7 +2,6 @@ import { SENSITIVE_URL_HINT_TAG } from "@openclaw/net-policy/redact-sensitive-ur
 // Covers canonical config schema defaults, validation, and sensitive redaction.
 import { expectDefined } from "@openclaw/normalization-core";
 import { beforeAll, describe, expect, it } from "vitest";
-import { z } from "zod";
 import { buildConfigSchemaCore, lookupConfigSchema } from "./schema.js";
 import { applyDerivedTags } from "./schema.tags.js";
 import { applyResolvedConfigTierHints } from "./schema.tiers.js";
@@ -17,7 +16,10 @@ describe("config schema", () => {
     // from the schema surface while the runtime still accepted them. Assert
     // parity with the core schema rather than a key list, so a new core field
     // cannot reintroduce the bug by being forgotten here.
-    const coreChannels = z.toJSONSchema(OpenClawSchema, {
+    // Use the same conversion call as computeBaseConfigSchemaStablePayload, so an
+    // input-only core field cannot be missing from the expectation and get dropped.
+    const coreChannels = OpenClawSchema.toJSONSchema({
+      io: "input",
       target: "draft-07",
       unrepresentable: "any",
     }) as { properties?: { channels?: { properties?: Record<string, unknown> } } };

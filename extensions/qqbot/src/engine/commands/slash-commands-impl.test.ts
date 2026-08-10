@@ -308,7 +308,10 @@ describe("QQBot framework slash commands", () => {
 });
 
 describe("bot-upgrade guide url", () => {
-  function runUpgradeCommand(accountConfig: SlashCommandContext["accountConfig"]): string {
+  function runUpgradeCommand(
+    accountConfig: SlashCommandContext["accountConfig"],
+    commandAuthorized = true,
+  ): string {
     const registry = new SlashCommandRegistry();
     registerBasicBotCommands(registry);
     const command = registry.getAllCommands().get("bot-upgrade");
@@ -316,18 +319,29 @@ describe("bot-upgrade guide url", () => {
       throw new Error("bot-upgrade command not registered");
     }
     const result = command.handler(
-      createStreamingContext({ rawContent: "/bot-upgrade", accountConfig }),
+      createStreamingContext({ rawContent: "/bot-upgrade", accountConfig, commandAuthorized }),
     );
     return typeof result === "string" ? result : "";
   }
 
-  it("returns the operator-configured upgrade url", () => {
+  it("returns the operator-configured upgrade url to an authorized sender", () => {
     const output = runUpgradeCommand({
       allowFrom: ["*"],
       upgradeUrl: "https://ops.example.com/qqbot-upgrade",
     });
     expect(output).toContain("https://ops.example.com/qqbot-upgrade");
     expect(output).not.toContain("q.qq.com/qqbot/openclaw/upgrade.html");
+  });
+
+  it("never reveals a configured guide to an unauthorized C2C sender", () => {
+    // /bot-upgrade is deliberately outside the allowlist, so any contact can run
+    // it. A configured guide may be a private runbook and must not leak here.
+    const output = runUpgradeCommand(
+      { allowFrom: ["*"], upgradeUrl: "https://ops.example.com/qqbot-upgrade" },
+      false,
+    );
+    expect(output).not.toContain("ops.example.com");
+    expect(output).toContain("q.qq.com/qqbot/openclaw/upgrade.html");
   });
 
   it("falls back to the bundled guide when the key is unset or blank", () => {

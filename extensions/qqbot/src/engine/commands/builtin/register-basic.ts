@@ -92,12 +92,16 @@ export function registerBasicBotCommands(registry: SlashCommandRegistry): void {
     c2cOnly: true,
     usage: [`/bot-upgrade`, ``, `查看 QQBot 升级说明。`].join("\n"),
     // channels.qqbot.upgradeUrl documents itself as the URL this command returns,
-    // so an operator-configured guide wins over the bundled default.
+    // so an operator-configured guide wins over the bundled default. This command
+    // is deliberately outside the allowlist, and a configured guide may be a
+    // private runbook, so only authorized senders see it; everyone else keeps the
+    // public bundled link.
     handler: (ctx) => {
-      const configuredUrl =
-        typeof ctx.accountConfig?.upgradeUrl === "string"
+      const configuredUrl = ctx.commandAuthorized
+        ? typeof ctx.accountConfig?.upgradeUrl === "string"
           ? normalizeOptionalString(ctx.accountConfig.upgradeUrl)
-          : undefined;
+          : undefined
+        : undefined;
       return [
         `📘 QQBot 升级指引：`,
         `[点击查看升级说明](${configuredUrl ?? QQBOT_UPGRADE_GUIDE_URL})`,

@@ -350,9 +350,11 @@ silently dropping the message.
 require the allowlist — any C2C sender can run them.
 
 `/bot-upgrade` returns the `upgradeUrl` configured for the account that received
-the command. The key is accepted at `channels.qqbot.upgradeUrl` and at
-`channels.qqbot.accounts.<id>.upgradeUrl`. Leave it unset to keep the bundled
-OpenClaw upgrade guide link.
+the command, but only to a sender on the explicit non-wildcard allowlist. Any
+other C2C sender gets the bundled public OpenClaw guide, so a private runbook URL
+is never exposed by this unauthenticated command. The key is accepted at
+`channels.qqbot.upgradeUrl` and at `channels.qqbot.accounts.<id>.upgradeUrl`;
+leave it unset to always return the bundled link.
 
 When QQ Bot exec approvals use the default same-chat fallback, native approval
 button clicks follow the same explicit non-wildcard command allowlist. To

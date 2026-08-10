@@ -77,9 +77,7 @@ async function dispatchModelReply(params: {
   // Model mode sends the completion straight to ClickClack instead of going
   // through the agent reply pipeline, so it has to resolve the configured
   // prefix itself or `responsePrefix` is accepted and never rendered. The
-  // pipeline owns template resolution; only the concatenation is local, and a
-  // fresh completion can never already carry the prefix the way a round-tripped
-  // agent reply can, so the shared startsWith guard has nothing to dedupe here.
+  // pipeline owns template resolution; only the concatenation is local.
   const replyPipeline = createChannelMessageReplyPipeline({
     cfg: params.cfg,
     agentId: params.route.agentId,
@@ -93,7 +91,13 @@ async function dispatchModelReply(params: {
     thinkLevel: undefined,
   });
   const responsePrefix = replyPipeline.resolveResponsePrefix?.();
-  const text = responsePrefix ? `${responsePrefix} ${completion}` : completion;
+  // Mirror the shared reply normalizer's guard: systemPrompt is operator-owned, so
+  // a completion can already open with the configured prefix and must not get a
+  // second copy.
+  const text =
+    responsePrefix && !completion.startsWith(responsePrefix)
+      ? `${responsePrefix} ${completion}`
+      : completion;
   await sendClickClackText({
     cfg: params.cfg as CoreConfig,
     accountId: params.account.accountId,

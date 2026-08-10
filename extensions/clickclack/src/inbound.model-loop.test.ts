@@ -127,6 +127,46 @@ describe("ClickClack direct-model response prefix", () => {
       );
     }
   });
+
+  it("does not add a second prefix when the completion already opens with one", () => {
+    // systemPrompt is operator-owned, so a model can be told to emit the prefix
+    // itself; concatenating unconditionally would send "[bot] [bot] ...".
+    sendClickClackTextMock.mockClear();
+    const runtime = createRuntime();
+    (
+      runtime.llm.complete as unknown as { mockResolvedValue: (v: unknown) => void }
+    ).mockResolvedValue({
+      text: "[bot] service bot online",
+      provider: "openai",
+      model: "gpt-5.4-mini",
+      agentId: "service-bot",
+      usage: {},
+      execution: { mode: "direct-provider", owner: { kind: "provider", id: "openai" } },
+      audit: { caller: { kind: "plugin", id: "clickclack" } },
+    });
+    setClickClackRuntime(runtime);
+    const message = {
+      id: "msg_01arz3ndektsv4rrffq69g5fcb",
+      workspace_id: "wsp_model_loop",
+      channel_id: "chn_model_prefix_dedupe",
+      author_id: "usr_model_sender",
+      thread_root_id: "msg_01arz3ndektsv4rrffq69g5fcb",
+      body: "hello bot",
+      body_format: "markdown" as const,
+      created_at: "2026-05-09T12:00:00.000Z",
+    };
+
+    return handleClickClackInbound({
+      account: createAccount(),
+      config: {
+        channels: { clickclack: { responsePrefix: "[bot]" } },
+      } as unknown as CoreConfig,
+      message,
+      access: createAccess({ eventId: message.id, conversationId: "chn_model_prefix_dedupe" }),
+    }).then(() => {
+      expect(sendClickClackTextMock.mock.calls[0]?.[0]?.text).toBe("[bot] service bot online");
+    });
+  });
 });
 
 describe("ClickClack direct-model bot loop protection", () => {

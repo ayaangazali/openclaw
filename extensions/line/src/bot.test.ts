@@ -72,6 +72,77 @@ async function resolveMediaMaxBytes(opts: {
   return context.mediaMaxBytes;
 }
 
+// Same seam as the media cap: the resolved pending-history cap is only visible
+// where the bot hands it to the webhook handlers.
+async function resolveHistoryLimit(line: Record<string, unknown>): Promise<unknown> {
+  let deliver: DeliverFn | undefined;
+  createLineWebhookSpoolMock.mockImplementation((spoolOptions: { deliver: DeliverFn }) => {
+    deliver = spoolOptions.deliver;
+    return { accept: vi.fn(), start: vi.fn(), stop: vi.fn() };
+  });
+
+  createLineBot({
+    channelAccessToken: "test-token",
+    channelSecret: "test-secret",
+    ...(typeof line.accountId === "string" ? { accountId: line.accountId } : {}),
+    config: {
+      messages: { groupChat: { historyLimit: 7 } },
+      channels: {
+        line: {
+          enabled: true,
+          channelAccessToken: "test-token",
+          channelSecret: "test-secret",
+          ...line,
+        },
+      },
+    } as unknown as OpenClawConfig,
+  });
+
+  if (!deliver) {
+    throw new Error("createLineBot did not build a spool deliver callback");
+  }
+  await deliver({ type: "message" } as webhook.Event, "destination", {});
+  return handleLineWebhookEventsMock.mock.calls.at(-1)?.[1]?.historyLimit;
+}
+
+describe("createLineBot pending history cap", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("hands the account value to the webhook handlers", async () => {
+    await expect(
+      resolveHistoryLimit({
+        historyLimit: 20,
+        accounts: { work: { historyLimit: 3 } },
+        accountId: "work",
+      }),
+    ).resolves.toBe(3);
+  });
+
+  it("falls back to the channel root when the account sets nothing", async () => {
+    await expect(
+      resolveHistoryLimit({ historyLimit: 20, accounts: { work: {} }, accountId: "work" }),
+    ).resolves.toBe(20);
+  });
+
+  it("falls through to the global value when neither channel scope is set", async () => {
+    await expect(resolveHistoryLimit({})).resolves.toBe(7);
+  });
+
+  it("keeps an explicit zero instead of falling through to the global value", async () => {
+    // A 0 cap disables the pending window; reading it as unset would silently
+    // restore 7 turns of context.
+    await expect(
+      resolveHistoryLimit({
+        historyLimit: 20,
+        accounts: { work: { historyLimit: 0 } },
+        accountId: "work",
+      }),
+    ).resolves.toBe(0);
+  });
+});
+
 describe("createLineBot media cap", () => {
   beforeEach(() => {
     vi.clearAllMocks();

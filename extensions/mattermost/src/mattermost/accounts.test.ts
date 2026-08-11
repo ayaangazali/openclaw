@@ -9,6 +9,44 @@ import {
   resolveMattermostReplyToMode,
 } from "./accounts.js";
 
+describe("mattermost history limit precedence", () => {
+  // The pending-history buffer reads account.config.historyLimit, and the account
+  // merge folds the channel root in, so this pins the full account -> channel ->
+  // global chain plus explicit 0 in one place.
+  const build = (mattermost: Record<string, unknown>): OpenClawConfig =>
+    ({
+      messages: { groupChat: { historyLimit: 7 } },
+      channels: {
+        mattermost: { botToken: "tok", baseUrl: "https://chat.example.com", ...mattermost },
+      },
+    }) as unknown as OpenClawConfig;
+
+  it("resolves account then channel then leaves global to the caller", () => {
+    expect(
+      resolveMattermostAccount({
+        cfg: build({ historyLimit: 20, accounts: { work: { historyLimit: 3 } } }),
+        accountId: "work",
+      }).config.historyLimit,
+    ).toBe(3);
+    expect(
+      resolveMattermostAccount({
+        cfg: build({ historyLimit: 20, accounts: { work: {} } }),
+        accountId: "work",
+      }).config.historyLimit,
+    ).toBe(20);
+    expect(resolveMattermostAccount({ cfg: build({}) }).config.historyLimit).toBeUndefined();
+  });
+
+  it("preserves an explicit zero instead of reading it as unset", () => {
+    expect(
+      resolveMattermostAccount({
+        cfg: build({ historyLimit: 20, accounts: { work: { historyLimit: 0 } } }),
+        accountId: "work",
+      }).config.historyLimit,
+    ).toBe(0);
+  });
+});
+
 describe("resolveDefaultMattermostAccountId", () => {
   it("prefers channels.mattermost.defaultAccount when it matches a configured account", () => {
     const cfg: OpenClawConfig = {

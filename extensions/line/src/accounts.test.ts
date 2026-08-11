@@ -36,6 +36,41 @@ describe("LINE accounts", () => {
   });
 
   describe("resolveLineAccount", () => {
+    it("resolves the documented historyLimit precedence", () => {
+      // The pending-history buffer reads account.config.historyLimit, and the
+      // account merge folds the channel root in, so this pins the full
+      // account -> channel -> global chain plus explicit 0 in one place.
+      const build = (line: Record<string, unknown>): OpenClawConfig =>
+        ({
+          messages: { groupChat: { historyLimit: 7 } },
+          channels: { line: { channelAccessToken: "t", channelSecret: "s", ...line } },
+        }) as unknown as OpenClawConfig;
+
+      // Account wins over channel root.
+      expect(
+        resolveLineAccount({
+          cfg: build({ historyLimit: 20, accounts: { work: { historyLimit: 3 } } }),
+          accountId: "work",
+        }).config.historyLimit,
+      ).toBe(3);
+      // Channel root applies when the account sets nothing.
+      expect(
+        resolveLineAccount({
+          cfg: build({ historyLimit: 20, accounts: { work: {} } }),
+          accountId: "work",
+        }).config.historyLimit,
+      ).toBe(20);
+      // Neither scope set leaves the global value to the caller's fallback.
+      expect(resolveLineAccount({ cfg: build({}) }).config.historyLimit).toBeUndefined();
+      // Explicit 0 must survive rather than reading as unset.
+      expect(
+        resolveLineAccount({
+          cfg: build({ historyLimit: 20, accounts: { work: { historyLimit: 0 } } }),
+          accountId: "work",
+        }).config.historyLimit,
+      ).toBe(0);
+    });
+
     it("resolves account from config", () => {
       const cfg: OpenClawConfig = {
         channels: {

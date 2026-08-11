@@ -40,9 +40,6 @@ describe("config schema", () => {
 
   type SchemaInput = NonNullable<Parameters<typeof buildConfigSchemaCore>[0]>;
   let baseSchema: ReturnType<typeof buildConfigSchemaCore>;
-
-  type SchemaInput = NonNullable<Parameters<typeof buildConfigSchemaCore>[0]>;
-  let baseSchema: ReturnType<typeof buildConfigSchemaCore>;
   let pluginUiHintInput: SchemaInput;
   let tokenHintInput: SchemaInput;
   let mergedSchemaInput: SchemaInput;

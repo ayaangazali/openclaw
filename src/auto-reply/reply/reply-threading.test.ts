@@ -163,6 +163,35 @@ describe("resolveReplyToMode", () => {
     expect(resolveReplyToMode(cfg, "irc", null, "channel")).toBe("off");
   });
 
+  it("lets an account default outrank a root chat-type policy", () => {
+    // Account scope has to be exhausted before root is consulted; otherwise a
+    // channel-wide chat-type policy silently overrides the account setting.
+    setActivePluginRegistry(createTestRegistry([]));
+    const cfg = {
+      channels: {
+        irc: {
+          replyToMode: "off",
+          replyToModeByChatType: { channel: "off" },
+          accounts: { work: { replyToMode: "all" } },
+        },
+      },
+    } as unknown as OpenClawConfig;
+
+    expect(resolveReplyToMode(cfg, "irc", "work", "channel")).toBe("all");
+    // An account chat-type entry still beats the account default.
+    const scopedCfg = {
+      channels: {
+        irc: {
+          replyToModeByChatType: { channel: "off" },
+          accounts: { work: { replyToMode: "all", replyToModeByChatType: { channel: "first" } } },
+        },
+      },
+    } as unknown as OpenClawConfig;
+    expect(resolveReplyToMode(scopedCfg, "irc", "work", "channel")).toBe("first");
+    // With no account entry at all the root chat-type policy still applies.
+    expect(resolveReplyToMode(cfg, "irc", "other", "channel")).toBe("off");
+  });
+
   it("matches a human-form account key against the canonicalized routed id", () => {
     // Routing hands this resolver canonical ids, so a preserved config key like
     // "Ops Team" must still match "ops-team" or the override is silently dropped.

@@ -60,13 +60,22 @@ function resolveConfiguredReplyToMode(
         normalizeAccountId,
       )
     : undefined;
+  // Account scope wins entirely before root is consulted, matching the ordering
+  // Signal's own resolver uses (extensions/signal/src/accounts.ts:295-311).
+  // Checking the root chat-type map first let a channel policy override the
+  // account default this fallback exists to honor.
   const normalizedChatType = normalizeReplyToModeChatType(chatType);
   if (normalizedChatType) {
-    const scopedMode =
-      accountConfig?.replyToModeByChatType?.[normalizedChatType] ??
-      channelConfig?.replyToModeByChatType?.[normalizedChatType];
-    if (scopedMode !== undefined) {
-      return scopedMode;
+    const accountScoped = accountConfig?.replyToModeByChatType?.[normalizedChatType];
+    if (accountScoped !== undefined) {
+      return accountScoped;
+    }
+    if (accountConfig?.replyToMode !== undefined) {
+      return accountConfig.replyToMode;
+    }
+    const channelScoped = channelConfig?.replyToModeByChatType?.[normalizedChatType];
+    if (channelScoped !== undefined) {
+      return channelScoped;
     }
   }
   return accountConfig?.replyToMode ?? channelConfig?.replyToMode ?? "all";

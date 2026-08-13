@@ -12,8 +12,13 @@ type DeliverFn = (
 const { createLineWebhookSpoolMock, handleLineWebhookEventsMock } = vi.hoisted(() => ({
   createLineWebhookSpoolMock: vi.fn(),
   // Typed parameters so the recorded call can be read back as the handler context.
+  // Keep this in step with what createLineBot passes: a narrower type here blocks
+  // assertions on fields the bot really hands to the handlers.
   handleLineWebhookEventsMock: vi.fn(
-    async (_events: webhook.Event[], _context: { mediaMaxBytes: number }) => {},
+    async (
+      _events: webhook.Event[],
+      _context: { mediaMaxBytes: number; historyLimit?: number },
+    ) => {},
   ),
 }));
 

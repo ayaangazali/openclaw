@@ -148,13 +148,21 @@ describe("ClickClack direct-model response prefix", () => {
     const message = {
       id: "msg_01arz3ndektsv4rrffq69g5fcb",
       workspace_id: "wsp_model_loop",
-      channel_id: "chn_model_prefix_dedupe",
+      direct_conversation_id: "dm_model_prefix_dedupe",
       author_id: "usr_model_sender",
       thread_root_id: "msg_01arz3ndektsv4rrffq69g5fcb",
       body: "hello bot",
       body_format: "markdown" as const,
       created_at: "2026-05-09T12:00:00.000Z",
-    };
+      author: {
+        id: "usr_model_sender",
+        kind: "human" as const,
+        display_name: "Model sender",
+        handle: "model-sender",
+        avatar_url: "",
+        created_at: "2026-05-09T12:00:00.000Z",
+      },
+    } satisfies ClickClackMessage;
 
     return handleClickClackInbound({
       account: createAccount(),
@@ -162,7 +170,6 @@ describe("ClickClack direct-model response prefix", () => {
         channels: { clickclack: { responsePrefix: "[bot]" } },
       } as unknown as CoreConfig,
       message,
-      access: createAccess({ eventId: message.id, conversationId: "chn_model_prefix_dedupe" }),
     }).then(() => {
       expect(sendClickClackTextMock.mock.calls[0]?.[0]?.text).toBe("[bot] service bot online");
     });

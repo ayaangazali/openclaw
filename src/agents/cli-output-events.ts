@@ -313,10 +313,9 @@ export function dispatchClaudeCliStreamingToolEvent(params: {
       const pending = tracker.pendingByIndex.get(event.index);
       tracker.pendingByIndex.delete(event.index);
       if (pending) {
-        // Delta presence, not key count, decides which input wins. An empty tool
-        // invocation is serialized as an explicit `{}` delta, so keying on key
-        // count would let a populated start snapshot overwrite a real no-argument
-        // call. Received deltas are authoritative whenever any arrived.
+        // Delta presence, not key count, decides the winner: a no-argument call
+        // arrives as an explicit `{}` delta, so keying on key count would let the
+        // start snapshot overwrite it.
         const args =
           pending.inputJsonParts.length > 0
             ? parseToolInputJson(pending.inputJsonParts)

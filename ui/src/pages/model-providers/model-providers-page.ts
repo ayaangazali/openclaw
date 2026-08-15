@@ -44,6 +44,8 @@ import {
   buildProviderApiKeyPatch,
   DEFAULT_MODELS_REPLACE_PATHS,
 } from "./mutations.ts";
+import { isMissingMethodError, mergeProbeResults } from "./probe-results.ts";
+import { ModelProvidersUsageRecovery } from "./usage-recovery.ts";
 import { renderModelProviders, type ModelProviderRowMessage } from "./view.ts";
 
 const MODEL_PROVIDERS_DOCS_URL = "https://docs.openclaw.ai/concepts/model-providers";
@@ -55,45 +57,6 @@ export type ModelProvidersRouteData = {
   /** Concrete agent whose credential store populated the auth snapshot. */
   agentId: string | null;
 };
-
-function isMissingMethodError(error: unknown): boolean {
-  return /method (?:not found|not supported)|unknown method/iu.test(
-    modelProviderErrorMessage(error),
-  );
-}
-
-const PROBE_FAILURE_PRIORITY: readonly ModelsProbeResult["status"][] = [
-  "auth",
-  "billing",
-  "rate_limit",
-  "timeout",
-  "format",
-  "no_model",
-  "unknown",
-];
-
-function mergeProbeResults(cardId: string, results: ModelsProbeResult[]): ModelsProbeResult {
-  if (results.length === 1) {
-    return results[0]!;
-  }
-  const status = results.some((result) => result.status === "ok")
-    ? "ok"
-    : (PROBE_FAILURE_PRIORITY.find((candidate) =>
-        results.some((result) => result.status === candidate),
-      ) ?? "unknown");
-  const error = results.find((result) => result.status === status)?.error;
-  return {
-    provider: cardId,
-    status,
-    ...(error ? { error } : {}),
-    results: results.flatMap((result) =>
-      result.results.map((target) => ({
-        ...target,
-        label: `${result.provider}: ${target.label}`,
-      })),
-    ),
-  };
-}
 
 export class ModelProvidersPage extends OpenClawLightDomElement {
   @consume({ context: applicationContext, subscribe: true })
@@ -174,6 +137,21 @@ export class ModelProvidersPage extends OpenClawLightDomElement {
       () => this.context?.agentSelection,
       (selection) => selection.subscribe(() => this.syncSelectedAgent()),
     );
+
+  // Registers itself with the host on construction; the field exists to own
+  // that lifetime, not to be read.
+  readonly usageRecovery = new ModelProvidersUsageRecovery(this, {
+    canRecover: () => {
+      const snapshot = this.context?.gateway.snapshot;
+      return (
+        snapshot?.phase === "connected" &&
+        Boolean(snapshot.client) &&
+        this.refreshTask.status !== TaskStatus.PENDING &&
+        this.data?.providerUsageUnavailable === true
+      );
+    },
+    recover: () => void this.refresh({ force: false }),
+  });
 
   override disconnectedCallback() {
     this.connectionLifecycle.transition({ client: null, phase: "stopped" });

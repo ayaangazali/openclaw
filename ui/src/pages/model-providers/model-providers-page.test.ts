@@ -199,6 +199,57 @@ describe("ModelProvidersPage agent scope", () => {
     expect(agentSelection.setScope).not.toHaveBeenCalled();
   });
 
+  it("refetches provider usage on page activation while the Gateway stays connected", async () => {
+    const { context, request } = createHarness("main");
+    const base = request.getMockImplementation();
+    let usageCalls = 0;
+    request.mockImplementation(async (method: string): Promise<unknown> => {
+      if (method === "usage.status") {
+        usageCalls += 1;
+        if (usageCalls === 1) {
+          throw new Error("usage.status unavailable");
+        }
+        return { updatedAt: 2, providers: [] };
+      }
+      return await base!(method);
+    });
+
+    const page = appendPage(context);
+    await vi.waitFor(() => expect(page.data?.updatedAt).toBeTruthy());
+    expect(page.data?.providerUsageUnavailable).toBe(true);
+    expect(usageCalls).toBe(1);
+
+    // No phase transition at any point: this is the path a reconnect-only check
+    // misses, leaving the cards empty until a manual Refresh.
+    globalThis.dispatchEvent(new Event("focus"));
+
+    await vi.waitFor(() => expect(usageCalls).toBe(2));
+    await vi.waitFor(() => expect(page.data?.providerUsageUnavailable).toBe(false));
+  });
+
+  it("does not refetch provider usage on activation when usage already loaded", async () => {
+    const { context, request } = createHarness("main");
+    const base = request.getMockImplementation();
+    let usageCalls = 0;
+    request.mockImplementation(async (method: string): Promise<unknown> => {
+      if (method === "usage.status") {
+        usageCalls += 1;
+        return { updatedAt: 2, providers: [] };
+      }
+      return await base!(method);
+    });
+
+    const page = appendPage(context);
+    await vi.waitFor(() => expect(page.data?.updatedAt).toBeTruthy());
+    expect(page.data?.providerUsageUnavailable).toBe(false);
+    expect(usageCalls).toBe(1);
+
+    globalThis.dispatchEvent(new Event("focus"));
+    await page.updateComplete;
+
+    expect(usageCalls).toBe(1);
+  });
+
   it("links the page subtitle to the model providers guide", async () => {
     const { context } = createHarness("main");
     const page = appendPage(context);

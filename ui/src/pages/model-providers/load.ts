@@ -30,6 +30,13 @@ export type ModelProvidersData = {
   catalogError: string | null;
   config: Record<string, unknown> | null;
   providerUsage: UsageSummary | null;
+  /**
+   * True only when `usage.status` rejected. A successful call with no usage is
+   * also `providerUsage: null`, so without this the page cannot tell "no usage
+   * yet" from "the request failed", and a failed load still stamps `updatedAt`
+   * and counts as fresh forever.
+   */
+  providerUsageUnavailable: boolean;
   costByProvider: SessionModelUsage[] | null;
   updatedAt: number | null;
   error: string | null;
@@ -46,6 +53,7 @@ export const EMPTY_MODEL_PROVIDERS_DATA: ModelProvidersData = {
   catalogError: null,
   config: null,
   providerUsage: null,
+  providerUsageUnavailable: false,
   costByProvider: null,
   updatedAt: null,
   error: null,
@@ -105,7 +113,10 @@ export async function loadModelProvidersData(
       request<ConfigSnapshot>("config.get", {})
         .then((snapshot) => resolveEditableSnapshotConfig(snapshot))
         .catch(() => null),
-      request<UsageSummary>("usage.status").catch(() => null),
+      request<UsageSummary>("usage.status").then(
+        (result) => ({ ok: true as const, result }),
+        () => ({ ok: false as const }),
+      ),
       requestSessionUsage(client, {
         startDate: localDate(MODEL_PROVIDERS_COST_DAYS - 1),
         endDate: localDate(0),
@@ -122,7 +133,8 @@ export async function loadModelProvidersData(
     providerOutcomes: catalogResult.ok ? (catalogResult.result?.providerOutcomes ?? []) : [],
     catalogError: catalogResult.ok ? null : errorMessage(catalogResult.error),
     config,
-    providerUsage,
+    providerUsage: providerUsage.ok ? (providerUsage.result ?? null) : null,
+    providerUsageUnavailable: !providerUsage.ok,
     costByProvider,
     updatedAt: Date.now(),
     // Auth status is the primary provider list; its failure is the only one

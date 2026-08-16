@@ -143,6 +143,12 @@ export class ModelProvidersPage extends OpenClawLightDomElement {
   readonly usageRecovery = new ModelProvidersUsageRecovery(this, {
     canRecover: () => {
       const snapshot = this.context?.gateway.snapshot;
+      // A Gateway that advertises its method list without usage.status can
+      // never satisfy the retry, so activation must not repeat it. `null` means
+      // the Gateway advertises no list at all, which stays retryable.
+      if (snapshot && isGatewayMethodAdvertised(snapshot, "usage.status") === false) {
+        return false;
+      }
       return (
         snapshot?.phase === "connected" &&
         Boolean(snapshot.client) &&

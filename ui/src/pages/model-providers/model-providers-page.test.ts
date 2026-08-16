@@ -227,6 +227,32 @@ describe("ModelProvidersPage agent scope", () => {
     await vi.waitFor(() => expect(page.data?.providerUsageUnavailable).toBe(false));
   });
 
+  it("does not retry on activation when the Gateway excludes usage.status", async () => {
+    const { context, request, snapshot } = createHarness("main");
+    // An advertised method list without usage.status can never satisfy the
+    // retry, so activation must not keep repeating it.
+    snapshot.hello = { features: { methods: ["models.list", "config.get"] } } as never;
+    const base = request.getMockImplementation();
+    let usageCalls = 0;
+    request.mockImplementation(async (method: string): Promise<unknown> => {
+      if (method === "usage.status") {
+        usageCalls += 1;
+        throw new Error("usage.status unavailable");
+      }
+      return await base!(method);
+    });
+
+    const page = appendPage(context);
+    await vi.waitFor(() => expect(page.data?.updatedAt).toBeTruthy());
+    expect(page.data?.providerUsageUnavailable).toBe(true);
+    const callsAfterLoad = usageCalls;
+
+    globalThis.dispatchEvent(new Event("focus"));
+    await page.updateComplete;
+
+    expect(usageCalls).toBe(callsAfterLoad);
+  });
+
   it("does not refetch provider usage on activation when usage already loaded", async () => {
     const { context, request } = createHarness("main");
     const base = request.getMockImplementation();

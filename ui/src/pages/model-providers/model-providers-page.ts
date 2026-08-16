@@ -13,9 +13,9 @@ import { renderDocsLink } from "../../components/settings-ui.ts";
 import { renderSettingsWorkspace } from "../../components/settings-workspace.ts";
 import { t } from "../../i18n/index.ts";
 import { normalizeAgentLabel } from "../../lib/agents/display.ts";
-import { createGatewayConnectionLifecycle } from "../../lib/gateway-connection-lifecycle.ts";
 import { isGatewayMethodAdvertised } from "../../lib/gateway-methods.ts";
 import { normalizeAgentId } from "../../lib/sessions/session-key.ts";
+import { GatewayPageController } from "../../lit/gateway-page-controller.ts";
 import { OpenClawLightDomElement } from "../../lit/openclaw-element.ts";
 import { SubscriptionsController } from "../../lit/subscriptions-controller.ts";
 import {
@@ -45,7 +45,6 @@ import {
   DEFAULT_MODELS_REPLACE_PATHS,
 } from "./mutations.ts";
 import { isMissingMethodError, mergeProbeResults } from "./probe-results.ts";
-import { ModelProvidersUsageRecovery } from "./usage-recovery.ts";
 import { renderModelProviders, type ModelProviderRowMessage } from "./view.ts";
 
 const MODEL_PROVIDERS_DOCS_URL = "https://docs.openclaw.ai/concepts/model-providers";
@@ -80,9 +79,14 @@ export class ModelProvidersPage extends OpenClawLightDomElement {
 
   /** Client the current data was loaded from; a new client means stale data. */
   private dataClient: GatewayBrowserClient | null = null;
-  private readonly connectionLifecycle = createGatewayConnectionLifecycle({
-    client: null,
-    phase: "stopped",
+  // Shared owner for this page's Gateway binding: it holds the request epoch
+  // every mutation re-checks after an await, and it owns focus/visibility
+  // activation, so usage recovery does not need a second listener pair.
+  private readonly gatewayPage = new GatewayPageController(this, {
+    getGateway: () => this.context?.gateway,
+    invalidateRequests: (change) =>
+      this.resetConnectionState(change.snapshot.client, change.snapshot.phase === "connected"),
+    onPageActivation: () => this.recoverProviderUsage(),
   });
   // Global config writes survive agent switches; their card state does not.
   private agentEpoch = 0;
@@ -112,10 +116,6 @@ export class ModelProvidersPage extends OpenClawLightDomElement {
   });
   private readonly subscriptions = new SubscriptionsController(this)
     .watch(
-      () => this.context?.gateway,
-      (gateway, notify) => gateway.subscribe(notify),
-    )
-    .watch(
       () => this.context?.runtimeConfig,
       (runtimeConfig, notify) => runtimeConfig.subscribe(notify),
       (runtimeConfig) => {
@@ -138,29 +138,7 @@ export class ModelProvidersPage extends OpenClawLightDomElement {
       (selection) => selection.subscribe(() => this.syncSelectedAgent()),
     );
 
-  // Registers itself with the host on construction; the field exists to own
-  // that lifetime, not to be read.
-  readonly usageRecovery = new ModelProvidersUsageRecovery(this, {
-    canRecover: () => {
-      const snapshot = this.context?.gateway.snapshot;
-      // A Gateway that advertises its method list without usage.status can
-      // never satisfy the retry, so activation must not repeat it. `null` means
-      // the Gateway advertises no list at all, which stays retryable.
-      if (snapshot && isGatewayMethodAdvertised(snapshot, "usage.status") === false) {
-        return false;
-      }
-      return (
-        snapshot?.phase === "connected" &&
-        Boolean(snapshot.client) &&
-        this.refreshTask.status !== TaskStatus.PENDING &&
-        this.data?.providerUsageUnavailable === true
-      );
-    },
-    recover: () => void this.refresh({ force: false }),
-  });
-
   override disconnectedCallback() {
-    this.connectionLifecycle.transition({ client: null, phase: "stopped" });
     void this.refreshTask.run([null, "", false]);
     this.subscriptions.clear();
     super.disconnectedCallback();
@@ -182,9 +160,6 @@ export class ModelProvidersPage extends OpenClawLightDomElement {
 
   override updated() {
     const snapshot = this.context.gateway.snapshot;
-    if (this.connectionLifecycle.transition(snapshot)) {
-      this.resetConnectionState(snapshot.client, snapshot.phase === "connected");
-    }
     if (
       !this.context.agents.state.agentsList &&
       !this.context.agents.state.agentsLoading &&
@@ -203,6 +178,24 @@ export class ModelProvidersPage extends OpenClawLightDomElement {
     if (stale || snapshot.client !== this.dataClient) {
       void this.refresh({ force: false });
     }
+  }
+
+  /** Retry a usage.status that failed while the Gateway stayed connected. */
+  private recoverProviderUsage(): void {
+    const snapshot = this.context?.gateway.snapshot;
+    // `focus` can fire while the document is hidden, and a Gateway that
+    // advertises its method list without usage.status can never satisfy the
+    // retry. `null` means no advertised list at all, which stays retryable.
+    if (document.hidden || !snapshot || snapshot.phase !== "connected" || !snapshot.client) {
+      return;
+    }
+    if (isGatewayMethodAdvertised(snapshot, "usage.status") === false) {
+      return;
+    }
+    if (this.refreshTask.status === TaskStatus.PENDING || !this.data?.providerUsageUnavailable) {
+      return;
+    }
+    void this.refresh({ force: false });
   }
 
   private resetConnectionState(client: GatewayBrowserClient | null, connected: boolean) {
@@ -225,7 +218,7 @@ export class ModelProvidersPage extends OpenClawLightDomElement {
   }
 
   private isCurrentClient(client: GatewayBrowserClient, epoch: number): boolean {
-    return this.connectionLifecycle.isCurrent({ client, epoch });
+    return this.gatewayPage.isCurrent({ client, epoch });
   }
 
   private resolveSelectedAgentId(): string {
@@ -335,7 +328,7 @@ export class ModelProvidersPage extends OpenClawLightDomElement {
     if (!client) {
       return { ok: false };
     }
-    const clientEpoch = this.connectionLifecycle.epoch;
+    const clientEpoch = this.gatewayPage.epoch;
     const agentEpoch = this.agentEpoch;
     return runModelProviderConfigMutation(
       {
@@ -418,7 +411,7 @@ export class ModelProvidersPage extends OpenClawLightDomElement {
     if (!client || !this.canMutate() || this.busy[key] || this.probeUnsupported) {
       return;
     }
-    const clientEpoch = this.connectionLifecycle.epoch;
+    const clientEpoch = this.gatewayPage.epoch;
     const agentId = this.selectedAgentId;
     const agentEpoch = this.agentEpoch;
     const probeEpoch = (this.probeEpochs.get(cardId) ?? 0) + 1;
@@ -472,7 +465,7 @@ export class ModelProvidersPage extends OpenClawLightDomElement {
     if (!client || !this.canMutate() || this.busy[key]) {
       return;
     }
-    const clientEpoch = this.connectionLifecycle.epoch;
+    const clientEpoch = this.gatewayPage.epoch;
     const agentId = this.selectedAgentId;
     const agentEpoch = this.agentEpoch;
     this.clearProbe(cardId);

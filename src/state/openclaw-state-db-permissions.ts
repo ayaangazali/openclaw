@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { createDedupeCache } from "../infra/dedupe.js";
+import { hasErrnoCode } from "../infra/errno.js";
 import { applyPrivateModeSync } from "../infra/private-mode.js";
 import { resolveSqliteDatabaseFilePaths } from "../infra/sqlite-files.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
@@ -54,7 +55,7 @@ export function ensureOpenClawStatePermissions(pathname: string, env: NodeJS.Pro
         // SQLite removes -wal/-shm at checkpoint or close, so a concurrent opener
         // can delete a sidecar between this check and the chmod. A vanished sidecar
         // has nothing left to harden; other faults stay fatal and loud.
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        if (!hasErrnoCode(error, "ENOENT")) {
           throw error;
         }
       }

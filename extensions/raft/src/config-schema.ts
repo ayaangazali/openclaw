@@ -10,7 +10,6 @@ const RaftAccountSchema = z
     name: z.string().optional(),
     enabled: z.boolean().optional(),
     configWrites: z.boolean().optional(),
-    responsePrefix: z.string().optional(),
     profile: z.string().min(1).optional(),
   })
   .strict();

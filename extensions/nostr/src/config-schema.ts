@@ -79,7 +79,6 @@ export const NostrConfigSchema = z.object({
   /** Whether this channel is enabled */
   enabled: z.boolean().optional(),
   configWrites: z.boolean().optional(),
-  responsePrefix: z.string().optional(),
 
   /** Markdown formatting overrides (tables). */
   markdown: MarkdownConfigSchema,

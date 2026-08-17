@@ -57,10 +57,26 @@ function accountSchemasOf(schema: JsonSchemaLike | undefined): JsonSchemaLike[] 
 
 /**
  * docs/concepts/messages.md documents channels.<channel>.responsePrefix and the
- * per-account form, and src/agents/identity.ts resolves it off whichever channel
- * is replying, with no allowlist, so no bundled channel may reject the key.
+ * per-account form, and `resolveResponsePrefix` in src/agents/identity.ts reads
+ * it. Applying it to an outbound reply is per-channel wiring rather than a
+ * shared step, so the contract is anchored to the channels that actually
+ * consume the prefix: offering the key elsewhere validates a setting the
+ * delivery path would ignore.
  */
-const channels = GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA.map((entry) => entry.channelId);
+const PREFIX_CAPABLE_CHANNELS = [
+  "clickclack",
+  "feishu",
+  "irc",
+  "line",
+  "matrix",
+  "mattermost",
+  "nextcloud-talk",
+  "tlon",
+  "twitch",
+  "whatsapp",
+  "zalo",
+  "zalouser",
+];
 
 function schemaFor(channelId: string): JsonSchemaLike | undefined {
   return asSchema(
@@ -69,18 +85,31 @@ function schemaFor(channelId: string): JsonSchemaLike | undefined {
   );
 }
 
+const knownChannels = new Set(
+  GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA.map((entry) => entry.channelId),
+);
+const prefixChannels = PREFIX_CAPABLE_CHANNELS.filter((channelId) => knownChannels.has(channelId));
+
 describe("channel responsePrefix contract", () => {
-  it("covers the bundled channels", () => {
-    expect(channels.length).toBeGreaterThan(0);
+  it("covers the prefix-capable bundled channels", () => {
+    expect(prefixChannels).toEqual(PREFIX_CAPABLE_CHANNELS);
   });
 
-  it.each(channels)("%s accepts channels.<id>.responsePrefix", (channelId) => {
+  it.each(prefixChannels)("%s accepts channels.<id>.responsePrefix", (channelId) => {
     expect(rejectsKey(schemaFor(channelId), "responsePrefix")).toBe(false);
   });
 
-  it.each(channels)("%s accepts channels.<id>.accounts.<account>.responsePrefix", (channelId) => {
-    for (const account of accountSchemasOf(schemaFor(channelId))) {
-      expect(rejectsKey(account, "responsePrefix")).toBe(false);
-    }
-  });
+  it.each(prefixChannels)(
+    "%s accepts channels.<id>.accounts.<account>.responsePrefix",
+    (channelId) => {
+      for (const account of accountSchemasOf(schemaFor(channelId))) {
+        // rejectsKey answers false for an open schema too, so acceptance only
+        // proves something once the account schema is closed.
+        if (account.additionalProperties !== false) {
+          continue;
+        }
+        expect(rejectsKey(account, "responsePrefix")).toBe(false);
+      }
+    },
+  );
 });

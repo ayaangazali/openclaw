@@ -16,8 +16,11 @@ function asSchema(value: unknown): JsonSchemaLike | undefined {
 
 /**
  * A closed schema without the key refuses the whole config. Composed schemas
- * must be walked: a union accepts when any alternative accepts, while allOf is
- * an intersection where one closed component still refuses the key.
+ * must be walked, and a union counts as rejecting when ANY alternative rejects:
+ * each alternative is a configuration mode an operator can choose, so a key
+ * missing from one mode is unusable in that mode even though the union as a
+ * whole would still validate. allOf is an intersection, where one closed
+ * component refusing the key refuses the whole.
  */
 function rejectsKey(schema: JsonSchemaLike | undefined, key: string): boolean {
   if (!schema) {
@@ -25,7 +28,7 @@ function rejectsKey(schema: JsonSchemaLike | undefined, key: string): boolean {
   }
   const alternatives = schema.anyOf ?? schema.oneOf;
   if (Array.isArray(alternatives) && alternatives.length > 0) {
-    return alternatives.every((branch) => rejectsKey(asSchema(branch), key));
+    return alternatives.some((branch) => rejectsKey(asSchema(branch), key));
   }
   if (Array.isArray(schema.allOf) && schema.allOf.length > 0) {
     return schema.allOf.some((branch) => rejectsKey(asSchema(branch), key));
@@ -36,7 +39,7 @@ function rejectsKey(schema: JsonSchemaLike | undefined, key: string): boolean {
   return !Object.hasOwn(schema.properties ?? {}, key);
 }
 
-/** Account schemas across every alternative, so unions are not skipped. */
+/** Account schemas across every composed branch, so unions and allOf are not skipped. */
 function accountSchemasOf(schema: JsonSchemaLike | undefined): JsonSchemaLike[] {
   if (!schema) {
     return [];
@@ -44,6 +47,9 @@ function accountSchemasOf(schema: JsonSchemaLike | undefined): JsonSchemaLike[] 
   const alternatives = schema.anyOf ?? schema.oneOf;
   if (Array.isArray(alternatives) && alternatives.length > 0) {
     return alternatives.flatMap((branch) => accountSchemasOf(asSchema(branch)));
+  }
+  if (Array.isArray(schema.allOf) && schema.allOf.length > 0) {
+    return schema.allOf.flatMap((branch) => accountSchemasOf(asSchema(branch)));
   }
   const account = asSchema(asSchema(schema.properties?.accounts)?.additionalProperties);
   return account ? [account] : [];

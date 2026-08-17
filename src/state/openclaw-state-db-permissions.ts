@@ -48,7 +48,16 @@ export function ensureOpenClawStatePermissions(pathname: string, env: NodeJS.Pro
   }
   for (const candidate of resolveSqliteDatabaseFilePaths(pathname)) {
     if (existsSync(candidate)) {
-      bestEffortChmodSync(candidate, OPENCLAW_STATE_FILE_MODE);
+      try {
+        bestEffortChmodSync(candidate, OPENCLAW_STATE_FILE_MODE);
+      } catch (error) {
+        // SQLite removes -wal/-shm at checkpoint or close, so a concurrent opener
+        // can delete a sidecar between this check and the chmod. A vanished sidecar
+        // has nothing left to harden; other faults stay fatal and loud.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw error;
+        }
+      }
     }
   }
 }

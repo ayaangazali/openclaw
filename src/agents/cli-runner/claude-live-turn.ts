@@ -5,6 +5,7 @@ import {
   type DiagnosticToolParamsSummary,
   type DiagnosticToolSource,
 } from "../../infra/diagnostic-events.js";
+import { formatErrorMessage } from "../../infra/errors.js";
 import type {
   CliBackendConfig,
   CliBackendParseJsonlEvent,
@@ -136,9 +137,12 @@ export function failClaudeTurn(host: ClaudeLiveTurnHost, error: unknown): void {
   if (!turn) {
     return;
   }
-  const errorKind = error instanceof Error ? error.name : typeof error;
+  // error.name is "Error" for most provider and HTTP failures, so a 529, a socket
+  // reset and a parse failure all logged identically. Carry the message and the
+  // run ids the turn already holds so a failure can be read and correlated.
+  const refs = diagnosticBase(turn);
   cliBackendLog.warn(
-    `claude live session turn failed: provider=${host.providerId} model=${host.modelId} durationMs=${Date.now() - turn.startedAtMs} error=${errorKind}`,
+    `claude live session turn failed: provider=${host.providerId} model=${host.modelId} runId=${refs.runId} sessionId=${refs.sessionId} durationMs=${Date.now() - turn.startedAtMs} error=${formatErrorMessage(error)}`,
   );
   turn.streamingParser.finish();
   failActiveClaudeLiveTools(turn, error);

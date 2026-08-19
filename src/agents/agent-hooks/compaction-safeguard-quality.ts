@@ -148,9 +148,12 @@ function summaryIncludesIdentifier(summary: string, identifier: string): boolean
 export function extractOpaqueIdentifiers(text: string): string[] {
   // Path and host/port candidates start at token boundaries so prose such as
   // "typecheck/lint/format" is not mistaken for an absolute path.
+  // The digit runs also reject a leading "." so a decimal such as 0.123456789
+  // does not donate its fractional digits as an identifier the guard then
+  // demands verbatim, which cancels compaction for data that is not an ID.
   const matches =
     text.match(
-      /([A-Fa-f0-9]{8,}|https?:\/\/\S+|(?<![A-Za-z0-9._-])\/[\w.-]{2,}(?:\/[\w.-]+)+|[A-Za-z]:\\[\w\\.-]+|(?<![A-Za-z0-9._-])[A-Za-z0-9._-]+\.[A-Za-z0-9._/-]+:\d{1,5}|\b\d{6,}\b)/g,
+      /((?<![A-Fa-f0-9.])[A-Fa-f0-9]{8,}|https?:\/\/\S+|(?<![A-Za-z0-9._-])\/[\w.-]{2,}(?:\/[\w.-]+)+|[A-Za-z]:\\[\w\\.-]+|(?<![A-Za-z0-9._-])[A-Za-z0-9._-]+\.[A-Za-z0-9._/-]+:\d{1,5}|(?<!\.)\b\d{6,}\b)/g,
     ) ?? [];
   return uniqueStrings(
     matches

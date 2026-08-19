@@ -1150,6 +1150,24 @@ describe("compaction-safeguard recent-turn preservation", () => {
     expect(quality.ok).toBe(true);
   });
 
+  it("does not treat decimal fractions in tool output as opaque identifiers", () => {
+    // A fractional digit run is numeric data, not an ID. Extracting it made the
+    // quality guard demand it verbatim in the summary, which it cannot contain,
+    // so compaction failed with missing_identifiers and never shrank the session.
+    expect(extractOpaqueIdentifiers("metric=0.123456789")).toStrictEqual([]);
+    expect(extractOpaqueIdentifiers("value 0.123456")).toStrictEqual([]);
+    expect(extractOpaqueIdentifiers("ratio=12.3456789")).toStrictEqual([]);
+    expect(extractOpaqueIdentifiers("p99=0.999999")).toStrictEqual([]);
+    // Scientific notation must not donate its exponent digits either.
+    expect(extractOpaqueIdentifiers("rate 1.5e123456")).toStrictEqual([]);
+  });
+
+  it("still extracts standalone numeric identifiers", () => {
+    // Guards the fix above against over-reaching: a bare digit run is still an ID.
+    expect(extractOpaqueIdentifiers("id 987654321")).toStrictEqual(["987654321"]);
+    expect(extractOpaqueIdentifiers("order 4567890123 shipped")).toStrictEqual(["4567890123"]);
+  });
+
   it("dedupes pure-hex identifiers across case variants", () => {
     const identifiers = extractOpaqueIdentifiers(
       "Track id a1b2c3d4e5f6 plus A1B2C3D4E5F6 and again a1b2c3d4e5f6",

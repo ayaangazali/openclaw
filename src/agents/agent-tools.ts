@@ -889,6 +889,15 @@ function createOpenClawCodingToolsInternal(options?: OpenClawCodingToolsOptions)
       }
       toolsForMemoryFlush.push(tool);
     }
+    if (!toolsForMemoryFlush.some((tool) => tool.name === "write")) {
+      // The flush run reaches here with nothing that can write, which happens when
+      // policy already removed `write` upstream. Without this the run completes
+      // normally and the model reports the save as done, so the memory is lost with
+      // no record anywhere that it was never persisted.
+      logWarn(
+        `memory flush cannot persist ${memoryFlushWritePath}: the write tool is unavailable for this agent, so this run will not save anything. Check tools.deny and tools.allow.`,
+      );
+    }
   }
   const unavailableCoreToolReason =
     isMemoryFlushRun && memoryFlushWritePath

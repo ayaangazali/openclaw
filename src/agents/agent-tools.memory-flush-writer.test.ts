@@ -53,6 +53,29 @@ describe("memory flush writer availability", () => {
     }
   });
 
+  it("warns when the message-provider allowlist is what drops write", async () => {
+    // TOOL_ALLOW_BY_MESSAGE_PROVIDER.node omits write, so this path loses the writer
+    // without tools.deny being involved. The warning must not blame a config key here.
+    const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-flush-node-"));
+    try {
+      const tools = createOpenClawCodingTools({
+        workspaceDir,
+        trigger: "memory",
+        memoryFlushWritePath: MEMORY_PATH,
+        messageProvider: "node",
+        senderIsOwner: true,
+      });
+
+      expect(tools.some((tool) => tool.name === "write")).toBe(false);
+      const warned = warnings.find((line) => line.includes("memory flush cannot persist"));
+      expect(warned).toBeDefined();
+      expect(warned).not.toContain("tools.deny");
+      expect(warned).not.toContain("tools.allow");
+    } finally {
+      await fs.rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
   it("stays quiet when the flush run keeps its writer", async () => {
     const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-flush-ok-"));
     try {

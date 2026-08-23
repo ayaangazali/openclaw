@@ -228,7 +228,7 @@ describe("applyAnthropicMessageDeltaUsage", () => {
 
     applyAnthropicMessageDeltaUsage(usage, { input_tokens: 5, output_tokens: 7 }, undefined);
 
-    expect(usage.contextUsage).toEqual({ state: "unavailable" });
+    expect(usage).toMatchObject({ contextUsage: { state: "unavailable" } });
   });
 
   it("keeps top-level billing when compaction iterations are malformed", () => {

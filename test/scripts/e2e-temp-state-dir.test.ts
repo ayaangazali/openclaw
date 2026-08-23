@@ -19,7 +19,10 @@ import { createE2eStateDir } from "../../scripts/e2e/lib/temp-state-dir.ts";
 async function waitForFile(filePath: string) {
   // Preserve the 2-second file budget while detecting child readiness sooner.
   for (let attempt = 0; attempt < 400; attempt += 1) {
-    if (existsSync(filePath)) {
+    // The child creates the path file and writes it in separate syscalls, so a reader
+    // can observe it empty. Returning on existence alone hands the caller "" and the
+    // state dir assertion then fails on a path that was never written.
+    if (existsSync(filePath) && readFileSync(filePath, "utf8").trim().length > 0) {
       return;
     }
     await delay(5);

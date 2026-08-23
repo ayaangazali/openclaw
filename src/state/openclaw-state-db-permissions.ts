@@ -54,8 +54,10 @@ export function ensureOpenClawStatePermissions(pathname: string, env: NodeJS.Pro
       } catch (error) {
         // SQLite removes -wal/-shm at checkpoint or close, so a concurrent opener
         // can delete a sidecar between this check and the chmod. A vanished sidecar
-        // has nothing left to harden; other faults stay fatal and loud.
-        if (!hasErrnoCode(error, "ENOENT")) {
+        // has nothing left to harden. The main database keeps its fail-loud
+        // boundary: swallowing its ENOENT would fall through to an open that
+        // creates a fresh empty database instead of surfacing the loss.
+        if (candidate === pathname || !hasErrnoCode(error, "ENOENT")) {
           throw error;
         }
       }

@@ -164,6 +164,23 @@ describe("state database permission hardening without chmod support", () => {
     expect(chmodFailHook.targets.some((target) => target.endsWith("-shm"))).toBe(true);
   });
 
+  it("rethrows when the main database vanishes between the existence check and the chmod", () => {
+    // resolveSqliteDatabaseFilePaths lists the unsuffixed database first. Losing
+    // it must stay fatal: swallowing that ENOENT would fall through to a SQLite
+    // open that creates a fresh empty database instead of surfacing the loss.
+    stateDir = fs.mkdtempSync(join(tmpdir(), "openclaw-state-chmod-"));
+    const options = { env: { OPENCLAW_STATE_DIR: stateDir } };
+    openOpenClawStateDatabase(options);
+    closeOpenClawStateDatabaseForTest();
+    chmodFailHook.error = chmodError("ENOENT");
+    chmodFailHook.failTargetSuffix = "openclaw.sqlite";
+    chmodFailHook.failProbe = false;
+
+    expect(() => openOpenClawStateDatabase(options)).toThrow(/ENOENT/);
+    // Guards against a vacuous pass if the main file were skipped before chmod.
+    expect(chmodFailHook.targets.some((target) => target.endsWith("openclaw.sqlite"))).toBe(true);
+  });
+
   it("repairs the schema when chmodSync throws ENOTSUP", () => {
     stateDir = fs.mkdtempSync(join(tmpdir(), "openclaw-state-chmod-"));
     openOpenClawStateDatabase({ env: { OPENCLAW_STATE_DIR: stateDir } });

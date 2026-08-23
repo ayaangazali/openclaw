@@ -889,15 +889,6 @@ function createOpenClawCodingToolsInternal(options?: OpenClawCodingToolsOptions)
       }
       toolsForMemoryFlush.push(tool);
     }
-    if (!toolsForMemoryFlush.some((tool) => tool.name === "write")) {
-      // The flush run reaches here with nothing that can write, which happens when
-      // policy already removed `write` upstream. Without this the run completes
-      // normally and the model reports the save as done, so the memory is lost with
-      // no record anywhere that it was never persisted.
-      logWarn(
-        `memory flush cannot persist ${memoryFlushWritePath}: the write tool is unavailable for this agent, so this run will not save anything. Check tools.deny and tools.allow.`,
-      );
-    }
   }
   const unavailableCoreToolReason =
     isMemoryFlushRun && memoryFlushWritePath
@@ -974,6 +965,20 @@ function createOpenClawCodingToolsInternal(options?: OpenClawCodingToolsOptions)
   replaceWithEffectiveCronCreatorToolAllowlist(cronCreatorToolAllowlist, authorizedTools, (tool) =>
     getPluginToolMeta(tool),
   );
+  if (
+    isMemoryFlushRun &&
+    memoryFlushWritePath &&
+    !authorizedTools.some((tool) => tool.name === "write")
+  ) {
+    // Checked on the final authorized list, not the earlier flush surface: tools.deny
+    // and the rest of the policy pipeline run after that surface is built, so a flush
+    // can hold `write` there and lose it here. Otherwise the run completes normally,
+    // the model reports the save as done, and the memory is lost with no record that
+    // it was never persisted.
+    logWarn(
+      `memory flush cannot persist ${memoryFlushWritePath}: the write tool is unavailable for this agent, so this run will not save anything. Check tools.deny and tools.allow.`,
+    );
+  }
   options?.recordToolPrepStage?.("authorization-policy");
   const turnSourceChannel = options?.messageChannel ?? options?.messageProvider;
   const turnSourceTo = options?.currentMessagingTarget ?? options?.currentChannelId;

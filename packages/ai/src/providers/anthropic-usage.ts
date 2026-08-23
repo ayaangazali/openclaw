@@ -242,6 +242,15 @@ export function applyAnthropicMessageDeltaUsage(
   if (resolved.cacheWrite1h !== undefined) {
     target.cacheWrite1h = resolved.cacheWrite1h;
   }
+  // A provider that never writes cache omits cache_creation_input_tokens entirely, so
+  // requiring both raw counters left those payloads on unavailable context and
+  // estimate-based compaction. One present counter settles the other at zero. This is
+  // a readiness guard only: promptTokens below reads the accumulator, and the billing
+  // fallback above still preserves prior values when a counter is absent.
+  const reportsCacheCounters =
+    usage.cache_read_input_tokens != null || usage.cache_creation_input_tokens != null;
+  const settledCacheRead = cacheReadTokens ?? (reportsCacheCounters ? 0 : undefined);
+  const settledCacheWrite = cacheWriteTokens ?? (reportsCacheCounters ? 0 : undefined);
   target.totalTokens = target.input + target.output + target.cacheRead + target.cacheWrite;
   const iterationUsage = readLastAnthropicIterationUsage(usage);
   if (iterationUsage.state === "valid") {
@@ -256,8 +265,8 @@ export function applyAnthropicMessageDeltaUsage(
     outputTokens !== undefined &&
     (messageStartPromptUsage !== undefined ||
       (inputTokens !== undefined &&
-        cacheReadTokens !== undefined &&
-        cacheWriteTokens !== undefined))
+        settledCacheRead !== undefined &&
+        settledCacheWrite !== undefined))
   ) {
     const promptTokens = target.input + target.cacheRead + target.cacheWrite;
     target.contextUsage = {

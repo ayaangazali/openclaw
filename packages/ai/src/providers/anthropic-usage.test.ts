@@ -197,6 +197,40 @@ describe("applyAnthropicMessageDeltaUsage", () => {
     });
   });
 
+  it("settles context usage with no iterations when the provider never writes cache", () => {
+    // The reported deployment: no `iterations` array, and a provider that omits
+    // cache_creation_input_tokens entirely. Requiring both raw counters left this
+    // path on unavailable context and estimate-based compaction.
+    const usage = emptyUsage();
+
+    applyAnthropicMessageDeltaUsage(
+      usage,
+      {
+        input_tokens: 5,
+        output_tokens: 7,
+        cache_read_input_tokens: 11,
+      },
+      undefined,
+    );
+
+    expect(usage).toMatchObject({
+      input: 5,
+      output: 7,
+      cacheRead: 11,
+      contextUsage: { state: "available", promptTokens: 16, totalTokens: 23 },
+    });
+  });
+
+  it("leaves context usage unavailable when no cache counter is reported at all", () => {
+    // Guard for the settling rule: with neither counter present there is nothing to
+    // settle against, so the reader must not invent a zeroed prompt total.
+    const usage = emptyUsage();
+
+    applyAnthropicMessageDeltaUsage(usage, { input_tokens: 5, output_tokens: 7 }, undefined);
+
+    expect(usage.contextUsage).toEqual({ state: "unavailable" });
+  });
+
   it("keeps top-level billing when compaction iterations are malformed", () => {
     const usage = emptyUsage();
 

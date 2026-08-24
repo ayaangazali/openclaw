@@ -108,7 +108,11 @@ const state = await createE2eStateDir("openclaw-e2e-temp-state-signal-", {
   OPENCLAW_STATE_DIR: "",
 });
 state.registerExitCleanup();
-writeFileSync(${JSON.stringify(statePathFile)}, state.stateDir);
+// Publish the path the way a real writer does: the file exists before its bytes
+// land, so a reader polling on existence alone observes it empty. Splitting the
+// two steps makes that window deterministic instead of a few syscalls wide.
+writeFileSync(${JSON.stringify(statePathFile)}, "");
+setTimeout(() => writeFileSync(${JSON.stringify(statePathFile)}, state.stateDir), 150);
 setInterval(() => {}, 1000);
 `,
       );

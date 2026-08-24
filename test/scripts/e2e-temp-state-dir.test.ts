@@ -19,10 +19,7 @@ import { createE2eStateDir } from "../../scripts/e2e/lib/temp-state-dir.ts";
 async function waitForFile(filePath: string) {
   // Preserve the 2-second file budget while detecting child readiness sooner.
   for (let attempt = 0; attempt < 400; attempt += 1) {
-    // The child creates the path file and writes it in separate syscalls, so a reader
-    // can observe it empty. Returning on existence alone hands the caller "" and the
-    // state dir assertion then fails on a path that was never written.
-    if (existsSync(filePath) && readFileSync(filePath, "utf8").trim().length > 0) {
+    if (existsSync(filePath)) {
       return;
     }
     await delay(5);
@@ -101,18 +98,16 @@ describe("E2E temp state dirs", () => {
       const helperUrl = pathToFileURL(path.resolve("scripts/e2e/lib/temp-state-dir.ts")).href;
       writeFileSync(
         scriptPath,
-        `import { writeFileSync } from "node:fs";
+        `import { renameSync, writeFileSync } from "node:fs";
 import { createE2eStateDir } from ${JSON.stringify(helperUrl)};
 
 const state = await createE2eStateDir("openclaw-e2e-temp-state-signal-", {
   OPENCLAW_STATE_DIR: "",
 });
 state.registerExitCleanup();
-// Publish the path the way a real writer does: the file exists before its bytes
-// land, so a reader polling on existence alone observes it empty. Splitting the
-// two steps makes that window deterministic instead of a few syscalls wide.
-writeFileSync(${JSON.stringify(statePathFile)}, "");
-setTimeout(() => writeFileSync(${JSON.stringify(statePathFile)}, state.stateDir), 150);
+// Publish atomically so the polling parent cannot observe an empty state-path file.
+writeFileSync(${JSON.stringify(`${statePathFile}.tmp`)}, state.stateDir);
+renameSync(${JSON.stringify(`${statePathFile}.tmp`)}, ${JSON.stringify(statePathFile)});
 setInterval(() => {}, 1000);
 `,
       );

@@ -50,7 +50,8 @@ function schemaFor(channelId: string): JsonSchemaLike | undefined {
  *
  * Excluded on purpose: imessage and msteams omit the key via
  * buildCommonChannelAccountShape; zalo and zalouser pin it through
- * createStaticReplyToModeResolver("off"), so config would be ignored; line,
+ * createStaticReplyToModeResolver("off") and reef pins it through a
+ * resolveReplyToMode that returns "all", so config would be ignored; line,
  * nostr, raft, sms and twitch emit no reply target at all.
  */
 const REPLY_CAPABLE_CHANNELS = [
@@ -60,7 +61,6 @@ const REPLY_CAPABLE_CHANNELS = [
   "irc",
   "nextcloud-talk",
   "qa-channel",
-  "reef",
   "tlon",
 ] as const;
 

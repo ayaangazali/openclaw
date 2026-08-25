@@ -12,7 +12,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket, type RawData } from "ws";
 import { parsePairingString } from "../../../chrome-extension/modules/relay-core.js";
 import { relayTestKey } from "../../../chrome-extension/relay-key.test-support.js";
-import { getBrowserControlState, stopBrowserControlService } from "../../control-service.js";
+import {
+  createBrowserControlContext,
+  getBrowserControlState,
+  stopBrowserControlService,
+} from "../../control-service.js";
 import { buildBrowserExtensionPairing } from "../extension-pairing.js";
 import { getFreePort } from "../test-port.js";
 import { createRelayProof, randomRelayNonce, relayKeyIdFromHex } from "./auth-v2-crypto.js";
@@ -153,6 +157,15 @@ describe.sequential("local Gateway extension relay wakeup", () => {
             expect(relay?.port).toBe(pairing.relayPort);
             if (!relay) {
               throw new Error("extension relay did not start");
+            }
+
+            for (let request = 0; request < 3; request += 1) {
+              const profile = createBrowserControlContext().forProfile("chrome").profile;
+              const cdpUrl = new URL(profile.cdpUrl);
+              expect(cdpUrl.username).toBe("openclaw-internal");
+              expect(cdpUrl.password === relay.internalToken).toBe(true);
+              expect(getBrowserControlState()?.extensionRelays?.get("chrome")).toBe(relay);
+              expect(extension.readyState).toBe(WebSocket.OPEN);
             }
 
             const authorization = Buffer.from(`openclaw-internal:${relay.internalToken}`).toString(

@@ -451,7 +451,22 @@ export function createProfileAvailability({
     const current = state();
     const remoteCdp = capabilities.isRemote;
     const attachOnly = profile.attachOnly;
-    const httpReachable = await isHttpReachable(undefined, signal);
+    let httpReachable: boolean;
+    if (capabilities.mode === "local-extension") {
+      const { ensureExtensionRelayForProfile } = await getExtensionRelayModule();
+      const relay = await ensureExtensionRelayForProfile(current, profile);
+      const connected = await relay.bridge.waitForExtensionConnection(
+        signal,
+        CHROME_MCP_ATTACH_READY_WINDOW_MS,
+      );
+      signal.throwIfAborted();
+      httpReachable =
+        connected &&
+        current.extensionRelays?.get(profile.name) === relay &&
+        (await isHttpReachable(undefined, signal));
+    } else {
+      httpReachable = await isHttpReachable(undefined, signal);
+    }
     const launchOptions = launchOptionsForEnsure(options);
 
     if (!httpReachable) {

@@ -437,6 +437,9 @@ async function cleanupProfileResources(params: {
       actor.cleanupRelays.delete(relay);
       if (params.state.extensionRelays?.get(runtime.profile.name) === relay) {
         params.state.extensionRelays.delete(runtime.profile.name);
+        const tokens = { ...params.state.resolved.extensionRelayInternalTokens };
+        delete tokens[runtime.profile.name];
+        params.state.resolved = { ...params.state.resolved, extensionRelayInternalTokens: tokens };
       }
     } catch (err) {
       firstError ??= toLifecycleError(err, "Browser relay cleanup failed.");

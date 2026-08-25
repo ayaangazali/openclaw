@@ -4,6 +4,7 @@ import * as chromeModule from "./chrome.js";
 import { ExtensionRelayBridge } from "./extension-relay/relay-bridge.js";
 import type { ExtensionRelayHandle } from "./extension-relay/relay-server.js";
 import { createBrowserRouteContext } from "./server-context.js";
+import { getProfileLifecycle } from "./server-context.lifecycle.js";
 import { makeBrowserProfile, makeBrowserServerState } from "./server-context.test-harness.js";
 import type { BrowserServerState } from "./server-context.types.js";
 
@@ -123,7 +124,46 @@ describe("extension profile readiness", () => {
     controller.abort(new Error("browser request cancelled"));
 
     expect((await cancelled) as Error).toHaveProperty("message", "browser request cancelled");
+    await vi.advanceTimersByTimeAsync(0);
+    const runtime = browser.state.profiles.get("chrome");
+    expect(runtime).toBeDefined();
+    if (runtime) {
+      const actor = getProfileLifecycle(runtime);
+      expect(actor.starts.size).toBe(0);
+      expect(actor.leases.size).toBe(0);
+    }
+    expect(vi.getTimerCount()).toBe(0);
     browser.dispose();
+  });
+
+  it("keeps a sibling attachment wait alive when one request is cancelled", async () => {
+    vi.useFakeTimers();
+    vi.mocked(chromeModule.isChromeReachable).mockResolvedValue(true);
+    const controller = new AbortController();
+    const browser = createExtensionProfile();
+    const cancelled = browser.profile
+      .ensureBrowserAvailable({ signal: controller.signal })
+      .catch((error: unknown) => error);
+    const sibling = browser.profile.ensureBrowserAvailable();
+    await vi.advanceTimersByTimeAsync(100);
+
+    controller.abort(new Error("first browser request cancelled"));
+    expect((await cancelled) as Error).toHaveProperty("message", "first browser request cancelled");
+    const runtime = browser.state.profiles.get("chrome");
+    expect(runtime).toBeDefined();
+    if (runtime) {
+      expect(getProfileLifecycle(runtime).leases.size).toBe(1);
+    }
+    expect(browser.state.extensionRelays?.get("chrome")).toBe(browser.relay);
+
+    browser.connect();
+    await expect(sibling).resolves.toBeUndefined();
+    if (runtime) {
+      expect(getProfileLifecycle(runtime).leases.size).toBe(0);
+    }
+    expect(browser.relay.bridge.extensionConnected).toBe(true);
+    browser.dispose();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("does not accept readiness from a relay replaced while its request was waiting", async () => {

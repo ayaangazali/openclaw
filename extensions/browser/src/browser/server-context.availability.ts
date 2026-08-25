@@ -45,6 +45,7 @@ import {
   ProfileRestartRequiredError,
   registerProfileHandle,
   releaseProfileHandle,
+  withProfileOperationLease,
 } from "./server-context.lifecycle.js";
 import type {
   BrowserServerState,
@@ -572,6 +573,24 @@ export function createProfileAvailability({
   };
 
   const ensureBrowserAvailable = async (options?: BrowserEnsureOptions): Promise<void> => {
+    if (capabilities.mode === "local-extension") {
+      // Gateway authentication needs a concurrent lease before it can send the
+      // hello this caller-owned, abortable readiness operation is waiting for.
+      await withProfileOperationLease({
+        state: state(),
+        runtime,
+        configRevision,
+        signal: options?.signal,
+        run: async (signal) =>
+          await ensureBrowserAvailableOnce(
+            signal,
+            getProfileLifecycle(runtime).generation,
+            options,
+          ),
+      });
+      return;
+    }
+
     const key = ensureOptionsKey(options);
     for (;;) {
       try {

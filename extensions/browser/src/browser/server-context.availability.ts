@@ -182,7 +182,7 @@ export function createProfileAvailability({
     }
     const { ensureExtensionRelayForProfile } = await getExtensionRelayModule();
     const current = state();
-    await ensureExtensionRelayForProfile(current, profile);
+    await ensureExtensionRelayForProfile(current, profile, signal);
     signal?.throwIfAborted();
   };
   const isReachable = async (
@@ -455,7 +455,7 @@ export function createProfileAvailability({
     let httpReachable: boolean;
     if (capabilities.mode === "local-extension") {
       const { ensureExtensionRelayForProfile } = await getExtensionRelayModule();
-      const relay = await ensureExtensionRelayForProfile(current, profile);
+      const relay = await ensureExtensionRelayForProfile(current, profile, signal);
       const connected = await relay.bridge.waitForExtensionConnection(
         signal,
         CHROME_MCP_ATTACH_READY_WINDOW_MS,

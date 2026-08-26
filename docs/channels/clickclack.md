@@ -301,6 +301,11 @@ safety bound can omit an older active thread.
 - `replyMode: "agent"` (default) dispatches inbound messages through the normal agent pipeline, including session recording and tool policy.
 - `replyMode: "model"` skips the agent pipeline and uses the plugin runtime's `llm.complete` for direct bot replies, optionally shaped by `model` and `systemPrompt`. The selected provider and model own the completion budget.
 
+Both modes honor `responsePrefix` at the channel or account level. Account
+values win, including `""` to disable an inherited prefix. Use `"auto"` for
+the routed agent's identity name or `"[{model}]"` for the selected model.
+Explicit `message` tool and CLI sends are unchanged.
+
 Model mode runs completions against the resolved bot agent id, which requires
 the explicit `plugins.entries.clickclack.llm.allowAgentIdOverride: true` trust
 bit:

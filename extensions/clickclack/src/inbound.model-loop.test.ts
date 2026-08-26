@@ -11,13 +11,13 @@ vi.mock("./outbound.js", () => ({
   sendClickClackText: sendClickClackTextMock,
 }));
 
-function createRuntime(): PluginRuntime {
+function createRuntime(text = "service bot online"): PluginRuntime {
   return createPluginRuntimeMock({
     llm: {
-      complete: vi.fn().mockResolvedValue({
-        text: "service bot online",
+      complete: vi.fn<PluginRuntime["llm"]["complete"]>().mockResolvedValue({
+        text,
         provider: "openai",
-        model: "gpt-5.4-mini",
+        model: "gpt-5.6-luna",
         agentId: "service-bot",
         usage: {},
         execution: {
@@ -27,7 +27,7 @@ function createRuntime(): PluginRuntime {
         audit: { caller: { kind: "plugin", id: "clickclack" } },
       }),
     },
-  } as unknown as PluginRuntime);
+  });
 }
 
 function createAccount(): ResolvedClickClackAccount {
@@ -64,10 +64,27 @@ describe("ClickClack direct-model response prefix", () => {
     sendClickClackTextMock.mockClear();
   });
 
-  // Model mode bypasses the agent reply pipeline, so the documented
-  // responsePrefix has to be resolved on this path or it is accepted and never
-  // rendered. The templated case pins that the selected model reaches the
-  // prefix context, which a plain string prefix would not prove.
+  function createMessage(): ClickClackMessage {
+    return {
+      id: "msg_01arz3ndektsv4rrffq69g5fca",
+      workspace_id: "wsp_model_loop",
+      direct_conversation_id: "dm_model_prefix",
+      author_id: "usr_model_sender",
+      thread_root_id: "msg_01arz3ndektsv4rrffq69g5fca",
+      body: "hello bot",
+      body_format: "markdown",
+      created_at: "2026-05-09T12:00:00.000Z",
+      author: {
+        id: "usr_model_sender",
+        kind: "human",
+        display_name: "Model sender",
+        handle: "model-sender",
+        avatar_url: "",
+        created_at: "2026-05-09T12:00:00.000Z",
+      },
+    };
+  }
+
   it("renders root, account, and templated prefixes on model replies", async () => {
     const cases = [
       {
@@ -90,36 +107,37 @@ describe("ClickClack direct-model response prefix", () => {
       {
         label: "templated",
         cfg: { channels: { clickclack: { responsePrefix: "[{model}]" } } },
-        expected: "[gpt-5.4-mini] service bot online",
+        expected: "[gpt-5.6-luna] service bot online",
+      },
+      {
+        label: "empty account override",
+        cfg: {
+          channels: {
+            clickclack: {
+              responsePrefix: "[root]",
+              accounts: { "model-loop-account": { responsePrefix: "" } },
+            },
+          },
+        },
+        expected: "service bot online",
+      },
+      {
+        label: "identity",
+        cfg: {
+          agents: { list: [{ id: "service-bot", identity: { name: "Service Bot" } }] },
+          channels: { clickclack: { responsePrefix: "auto" } },
+        },
+        expected: "[Service Bot] service bot online",
       },
     ];
 
     for (const testCase of cases) {
       sendClickClackTextMock.mockClear();
       setClickClackRuntime(createRuntime());
-      const message = {
-        id: "msg_01arz3ndektsv4rrffq69g5fca",
-        workspace_id: "wsp_model_loop",
-        direct_conversation_id: "dm_model_prefix",
-        author_id: "usr_model_sender",
-        thread_root_id: "msg_01arz3ndektsv4rrffq69g5fca",
-        body: "hello bot",
-        body_format: "markdown" as const,
-        created_at: "2026-05-09T12:00:00.000Z",
-        author: {
-          id: "usr_model_sender",
-          kind: "human" as const,
-          display_name: "Model sender",
-          handle: "model-sender",
-          avatar_url: "",
-          created_at: "2026-05-09T12:00:00.000Z",
-        },
-      } satisfies ClickClackMessage;
-
       await handleClickClackInbound({
         account: createAccount(),
-        config: testCase.cfg as unknown as CoreConfig,
-        message,
+        config: testCase.cfg,
+        message: createMessage(),
       });
 
       expect(sendClickClackTextMock.mock.calls[0]?.[0]?.text, testCase.label).toBe(
@@ -128,51 +146,18 @@ describe("ClickClack direct-model response prefix", () => {
     }
   });
 
-  it("does not add a second prefix when the completion already opens with one", () => {
-    // systemPrompt is operator-owned, so a model can be told to emit the prefix
-    // itself; concatenating unconditionally would send "[bot] [bot] ...".
+  it("does not add a second prefix when the completion already opens with one", async () => {
     sendClickClackTextMock.mockClear();
-    const runtime = createRuntime();
-    (
-      runtime.llm.complete as unknown as { mockResolvedValue: (v: unknown) => void }
-    ).mockResolvedValue({
-      text: "[bot] service bot online",
-      provider: "openai",
-      model: "gpt-5.4-mini",
-      agentId: "service-bot",
-      usage: {},
-      execution: { mode: "direct-provider", owner: { kind: "provider", id: "openai" } },
-      audit: { caller: { kind: "plugin", id: "clickclack" } },
-    });
+    const runtime = createRuntime("[bot] service bot online");
     setClickClackRuntime(runtime);
-    const message = {
-      id: "msg_01arz3ndektsv4rrffq69g5fcb",
-      workspace_id: "wsp_model_loop",
-      direct_conversation_id: "dm_model_prefix_dedupe",
-      author_id: "usr_model_sender",
-      thread_root_id: "msg_01arz3ndektsv4rrffq69g5fcb",
-      body: "hello bot",
-      body_format: "markdown" as const,
-      created_at: "2026-05-09T12:00:00.000Z",
-      author: {
-        id: "usr_model_sender",
-        kind: "human" as const,
-        display_name: "Model sender",
-        handle: "model-sender",
-        avatar_url: "",
-        created_at: "2026-05-09T12:00:00.000Z",
-      },
-    } satisfies ClickClackMessage;
-
-    return handleClickClackInbound({
+    await handleClickClackInbound({
       account: createAccount(),
       config: {
         channels: { clickclack: { responsePrefix: "[bot]" } },
-      } as unknown as CoreConfig,
-      message,
-    }).then(() => {
-      expect(sendClickClackTextMock.mock.calls[0]?.[0]?.text).toBe("[bot] service bot online");
+      },
+      message: createMessage(),
     });
+    expect(sendClickClackTextMock.mock.calls[0]?.[0]?.text).toBe("[bot] service bot online");
   });
 });
 

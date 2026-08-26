@@ -74,10 +74,7 @@ async function dispatchModelReply(params: {
       .warn(`[${params.account.accountId}] ClickClack model reply produced no sendable text`);
     return;
   }
-  // Model mode sends the completion straight to ClickClack instead of going
-  // through the agent reply pipeline, so it has to resolve the configured
-  // prefix itself or `responsePrefix` is accepted and never rendered. The
-  // pipeline owns template resolution; only the concatenation is local.
+  // Direct completions bypass agent dispatch; use its prefix/model-context owner.
   const replyPipeline = createChannelMessageReplyPipeline({
     cfg: params.cfg,
     agentId: params.route.agentId,
@@ -87,13 +84,10 @@ async function dispatchModelReply(params: {
   replyPipeline.onModelSelected?.({
     provider: result.provider,
     model: result.model,
-    // Model mode runs a single completion with no thinking-level negotiation.
     thinkLevel: undefined,
   });
   const responsePrefix = replyPipeline.resolveResponsePrefix?.();
-  // Mirror the shared reply normalizer's guard: systemPrompt is operator-owned, so
-  // a completion can already open with the configured prefix and must not get a
-  // second copy.
+  // An operator-owned system prompt may already ask the model to emit this prefix.
   const text =
     responsePrefix && !completion.startsWith(responsePrefix)
       ? `${responsePrefix} ${completion}`

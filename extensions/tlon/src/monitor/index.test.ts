@@ -1,7 +1,7 @@
 // Tlon monitor tests cover authentication, inbound context, and shutdown lifecycle.
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import path from "node:path";
+import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { createChannelMessageReplyPipeline } from "openclaw/plugin-sdk/channel-outbound";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
@@ -284,7 +284,7 @@ describe("monitorTlonProvider reply prefixes", () => {
     const controller = new AbortController();
     const runtime = { error: vi.fn(), exit: vi.fn(), log: vi.fn() } satisfies RuntimeEnv;
     realUrbitFixture.config = {
-      session: { store: path.join(stateDir, "sessions.json") },
+      session: { store: join(stateDir, "sessions.json") },
       agents: { list: [{ id: "main", identity: { name: "Test Bot" } }] },
       messages: { responsePrefix: "[global]" },
       channels: {
@@ -310,7 +310,6 @@ describe("monitorTlonProvider reply prefixes", () => {
         ...params,
         // This test observes the native send boundary, not queue persistence.
         delivery: { ...params.delivery, durable: false },
-        record: { shouldRecord: () => false },
         replyResolver: async (_ctx, options) => {
           options?.onModelSelected?.({
             provider: "openai",

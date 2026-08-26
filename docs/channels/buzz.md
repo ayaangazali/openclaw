@@ -393,8 +393,10 @@ hexadecimal form.
 Set `channels.buzz.responsePrefix` to prefix automatic agent replies, for
 example `"[Support]"`. Use `"auto"` for the routed agent's identity name,
 `"[{model}]"` for its selected model, or `""` to disable an inherited global
-prefix. This does not modify explicit `message` tool or CLI sends. Buzz uses
-one account per Gateway, so there is no nested `accounts` override.
+prefix. Explicit `message` tool and CLI text sends also apply literal and
+identity prefixes; see [shared prefix behavior](/concepts/messages#prefixes-threading-and-replies)
+for model-dependent templates. Buzz uses one account per Gateway, so there is
+no nested `accounts` override.
 
 ### Bot key storage
 

@@ -304,7 +304,9 @@ safety bound can omit an older active thread.
 Both modes honor `responsePrefix` at the channel or account level. Account
 values win, including `""` to disable an inherited prefix. Use `"auto"` for
 the routed agent's identity name or `"[{model}]"` for the selected model.
-Explicit `message` tool and CLI sends are unchanged.
+Explicit `message` tool and CLI text sends follow the
+[shared prefix behavior](/concepts/messages#prefixes-threading-and-replies),
+including omission of unresolved model-dependent prefixes.
 
 Model mode runs completions against the resolved bot agent id, which requires
 the explicit `plugins.entries.clickclack.llm.allowAgentIdOverride: true` trust

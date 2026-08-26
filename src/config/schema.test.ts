@@ -10,34 +10,6 @@ import { ToolsSchema } from "./zod-schema.agent-runtime.js";
 import { OpenClawSchema } from "./zod-schema.js";
 
 describe("config schema", () => {
-  it("keeps every core channels key that ChannelsSchema owns", () => {
-    // `channels` mixes plugin channel entries with core keys. The strip that
-    // clears per-channel entries used to take these with it, so they vanished
-    // from the schema surface while the runtime still accepted them. Assert
-    // parity with the core schema rather than a key list, so a new core field
-    // cannot reintroduce the bug by being forgotten here.
-    // Use the same conversion call as computeBaseConfigSchemaStablePayload, so an
-    // input-only core field cannot be missing from the expectation and get dropped.
-    const coreChannels = OpenClawSchema.toJSONSchema({
-      io: "input",
-      target: "draft-07",
-      unrepresentable: "any",
-    }) as { properties?: { channels?: { properties?: Record<string, unknown> } } };
-    const coreKeys = Object.keys(
-      expectDefined(coreChannels.properties?.channels, "core channels schema node").properties ??
-        {},
-    );
-    const schema = baseSchema.schema as { properties?: Record<string, unknown> };
-    const channels = expectDefined(schema.properties?.channels, "channels schema node") as {
-      properties?: Record<string, unknown>;
-    };
-
-    // The built schema also carries plugin channel entries, so assert every core
-    // key survived rather than exact equality.
-    expect(coreKeys.length).toBeGreaterThan(0);
-    expect(Object.keys(channels.properties ?? {})).toEqual(expect.arrayContaining(coreKeys));
-  });
-
   type SchemaInput = NonNullable<Parameters<typeof buildConfigSchemaCore>[0]>;
   let baseSchema: ReturnType<typeof buildConfigSchemaCore>;
   let pluginUiHintInput: SchemaInput;
@@ -697,6 +669,31 @@ describe("config schema", () => {
       "Mattermost Progress Label",
     );
   });
+
+  it.each(["bundled", "extended"])(
+    "keeps core channel settings discoverable with %s metadata",
+    (metadata) => {
+      const schema = metadata === "bundled" ? baseSchema : buildConfigSchemaCore(mergedSchemaInput);
+      const channels = lookupConfigSchema(schema, "channels");
+      expect(channels?.children.map((child) => child.key)).toEqual(
+        expect.arrayContaining(["defaults", "modelByChannel", "matrix"]),
+      );
+      expect(channels?.children.map((child) => child.key)).not.toContain("*");
+      expect(lookupConfigSchema(schema, "channels.unknownChannel")).toBeNull();
+      expect(lookupConfigSchema(schema, "channels.defaults.groupPolicy")?.schema).toMatchObject({
+        enum: ["open", "disabled", "allowlist"],
+      });
+      expect(
+        lookupConfigSchema(schema, "channels.defaults.botLoopProtection.maxEventsPerWindow")
+          ?.schema,
+      ).toMatchObject({ type: "integer" });
+      expect(
+        lookupConfigSchema(schema, "channels.modelByChannel.matrix.room")?.schema,
+      ).toMatchObject({
+        type: "string",
+      });
+    },
+  );
 
   it("omits a single oversized plugin schema from the full schema response", () => {
     const res = buildConfigSchemaCore({

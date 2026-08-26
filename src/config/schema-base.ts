@@ -103,7 +103,7 @@ type BaseConfigSchemaResponse = {
 
 type BaseConfigSchemaStablePayload = Omit<BaseConfigSchemaResponse, "generatedAt">;
 
-function stripChannelSchema(schema: ConfigSchema): ConfigSchema {
+function preparePublicSchema(schema: ConfigSchema): ConfigSchema {
   const next = cloneSchema(schema);
   const root = asSchemaObject(next);
   if (!root || !root.properties) {
@@ -117,11 +117,7 @@ function stripChannelSchema(schema: ConfigSchema): ConfigSchema {
   }
   const channelsNode = asSchemaObject(root.properties.channels);
   if (channelsNode) {
-    // Everything declared here comes from ChannelsSchema; per-channel entries are
-    // merged in later from plugin metadata. Clearing the map dropped the core keys
-    // from every generated surface (Control UI form, `config schema`, doc baseline)
-    // while the runtime still accepted them, so keep what the core schema owns.
-    channelsNode.required = [];
+    // Keep plugin config permissive without advertising an untyped lookup wildcard.
     channelsNode.additionalProperties = true;
   }
   return next;
@@ -153,7 +149,7 @@ function computeBaseConfigSchemaStablePayload(): BaseConfigSchemaStablePayload {
     "",
     isSensitiveUrlConfigPath,
   );
-  const publicSchema = stripChannelSchema(schema);
+  const publicSchema = preparePublicSchema(schema);
   const stablePayload = {
     schema: publicSchema,
     uiHints: applyDerivedTags(

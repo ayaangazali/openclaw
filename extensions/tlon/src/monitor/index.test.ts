@@ -1,13 +1,12 @@
-import { mkdtemp, rm } from "node:fs/promises";
 // Tlon monitor tests cover authentication, inbound context, and shutdown lifecycle.
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import os from "node:os";
 import path from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { createChannelMessageReplyPipeline } from "openclaw/plugin-sdk/channel-outbound";
-import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
+import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -264,6 +263,7 @@ it("awaits cumulative Tlon discovery persistence and retries failed writes", asy
 });
 
 describe("monitorTlonProvider reply prefixes", () => {
+  const tempDirs = useAutoCleanupTempDirTracker(afterEach);
   it.each([
     { name: "global fallback", root: undefined, account: undefined, expected: "[global] reply" },
     { name: "channel override", root: "[root]", account: undefined, expected: "[root] reply" },
@@ -280,7 +280,7 @@ describe("monitorTlonProvider reply prefixes", () => {
     const actual = await vi.importActual<typeof import("openclaw/plugin-sdk/channel-inbound")>(
       "openclaw/plugin-sdk/channel-inbound",
     );
-    const stateDir = await mkdtemp(path.join(os.tmpdir(), "tlon-prefix-"));
+    const stateDir = tempDirs.make("tlon-prefix-");
     const controller = new AbortController();
     const runtime = { error: vi.fn(), exit: vi.fn(), log: vi.fn() } satisfies RuntimeEnv;
     realUrbitFixture.config = {
@@ -346,7 +346,6 @@ describe("monitorTlonProvider reply prefixes", () => {
     } finally {
       controller.abort();
       await monitor;
-      await rm(stateDir, { recursive: true, force: true });
     }
   });
 });

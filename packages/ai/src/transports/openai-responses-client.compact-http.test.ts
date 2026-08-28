@@ -21,10 +21,7 @@ const compacted = {
 
 describe("prepared Responses compaction HTTP lifetime", () => {
   it("settles pending reads and releases the body when the consumer cancels", async () => {
-    let started!: () => void;
-    const pulling = new Promise<void>((resolve) => {
-      started = resolve;
-    });
+    const { promise: pulling, resolve: started } = Promise.withResolvers<void>();
     const cancel = vi.fn(() => new Promise<void>(() => {}));
     const body = new ReadableStream<Uint8Array>({
       pull() {
@@ -36,7 +33,10 @@ describe("prepared Responses compaction HTTP lifetime", () => {
     const response = await createBoundedOpenAIResponsesCompactionFetch(
       async () => new Response(body),
     )("https://synthetic.invalid/compact");
-    const reader = response.body!.getReader();
+    if (!response.body) {
+      throw new Error("Bounded response is missing its body");
+    }
+    const reader = response.body.getReader();
     const pending = reader.read();
     await pulling;
     try {
@@ -81,10 +81,7 @@ describe("prepared Responses compaction HTTP lifetime", () => {
     const abortController = new AbortController();
     const requestPaths: string[] = [];
     let watchdogFired = false;
-    let firstHeaders!: () => void;
-    const headersReceived = new Promise<void>((resolve) => {
-      firstHeaders = resolve;
-    });
+    const { promise: headersReceived, resolve: firstHeaders } = Promise.withResolvers<void>();
     configureAiTransportHost({
       resolveModelRequestTimeoutMs: () => (mode === "host-timeout" ? timeoutMs : undefined),
       buildModelFetch: () => async (input, init) => {
@@ -116,7 +113,9 @@ describe("prepared Responses compaction HTTP lifetime", () => {
         response.write('{"object":"response.compaction","output":[');
       }
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
     const watchdog = setTimeout(() => {
       watchdogFired = true;
       abortController.abort(new Error("fixture cleanup: compaction did not settle"));
@@ -124,7 +123,9 @@ describe("prepared Responses compaction HTTP lifetime", () => {
     }, 2_000);
     try {
       const address = server.address();
-      if (!address || typeof address === "string") throw new Error("Missing loopback address");
+      if (!address || typeof address === "string") {
+        throw new Error("Missing loopback address");
+      }
       const model = {
         id: "synthetic-model",
         name: "Synthetic model",
@@ -180,7 +181,9 @@ describe("prepared Responses compaction HTTP lifetime", () => {
       clearTimeout(watchdog);
       abortController.abort();
       server.closeAllConnections();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
     }
   });
 });

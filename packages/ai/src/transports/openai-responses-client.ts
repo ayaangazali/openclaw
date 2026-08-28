@@ -669,10 +669,6 @@ export function createAzureOpenAIResponsesTransportStreamFn(): StreamFn {
   });
 }
 
-function normalizeAzureBaseUrl(baseUrl: string): string {
-  return baseUrl.replace(/\/+$/, "");
-}
-
 function resolveAzureDeploymentName(model: Model): string {
   return resolveAzureDeploymentNameFromMap({
     modelId: model.id,
@@ -689,7 +685,7 @@ export function createAzureOpenAIClient(
   _sessionId?: string,
   fetchOverride?: typeof globalThis.fetch,
 ) {
-  const baseURL = normalizeAzureBaseUrl(model.baseUrl);
+  const baseURL = model.baseUrl.replace(/\/+$/, "");
   const clientOptions = {
     apiKey,
     dangerouslyAllowBrowser: true,

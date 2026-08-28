@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setQaChannelRuntime } from "../api.js";
 import { deleteQaBusMessage, editQaBusMessage, sendQaBusMessage } from "./bus-client.js";
 import { handleQaInbound } from "./inbound.js";
+import { createQaInboundParams, firstRunAssembledParams } from "./inbound.test-harness.js";
 
 const QA_GENERATED_IMAGE_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Z0nQAAAAASUVORK5CYII=";
@@ -42,57 +43,6 @@ vi.mock("openclaw/plugin-sdk/media-store", async (importOriginal) => ({
     contentType: "audio/ogg",
   })),
 }));
-
-type HandleQaInboundParams = Parameters<typeof handleQaInbound>[0];
-
-function createQaInboundParams(
-  overrides: {
-    accountConfig?: HandleQaInboundParams["account"]["config"];
-    message?: Partial<HandleQaInboundParams["message"]>;
-  } = {},
-): HandleQaInboundParams {
-  return {
-    channelId: "qa-channel",
-    channelLabel: "QA Channel",
-    account: {
-      accountId: "default",
-      enabled: true,
-      configured: true,
-      baseUrl: "http://127.0.0.1:43123",
-      botUserId: "openclaw",
-      botDisplayName: "OpenClaw QA",
-      pollTimeoutMs: 250,
-      config: {
-        allowFrom: ["*"],
-        ...overrides.accountConfig,
-      },
-    },
-    config: {},
-    message: {
-      id: "msg-1",
-      accountId: "default",
-      direction: "inbound",
-      conversation: {
-        kind: "direct",
-        id: "alice",
-      },
-      senderId: "alice",
-      senderName: "Alice",
-      text: "ping",
-      timestamp: 1_777_000_000_000,
-      reactions: [],
-      ...overrides.message,
-    },
-  };
-}
-
-function firstRunAssembledParams(runtime: ReturnType<typeof createPluginRuntimeMock>) {
-  const call = vi.mocked(runtime.channel.inbound.dispatch).mock.calls[0];
-  if (!call) {
-    throw new Error("expected assembled turn call");
-  }
-  return call[0];
-}
 
 describe("handleQaInbound", () => {
   beforeEach(() => {

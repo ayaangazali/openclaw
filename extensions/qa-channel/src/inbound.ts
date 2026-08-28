@@ -1,3 +1,4 @@
+import { createAsyncLock } from "openclaw/plugin-sdk/async-lock-runtime";
 import {
   buildChannelInboundEventContext,
   formatInboundMediaUnavailableText,
@@ -168,41 +169,39 @@ function createQaReplyPreview(params: {
   let currentText = "";
   let lastDurableText = "";
   let lastDurableToolCallSnapshot = "[]";
-  let pending = Promise.resolve();
+  // Partials run concurrently with delivery callbacks. Keep edits, deletion,
+  // and durable delivery in one queue without poisoning it after an error.
+  const withPreviewLock = createAsyncLock();
 
-  const write = (text: string) => {
+  const write = async (text: string) => {
     if (!text.trim() || text === currentText) {
-      return pending;
+      return;
     }
-    pending = pending.then(async () => {
-      if (messageId) {
-        await editQaBusMessage({
-          baseUrl: params.account.baseUrl,
-          accountId: params.account.accountId,
-          messageId,
-          text,
-        });
-      } else {
-        const response = await sendQaBusMessage({
-          baseUrl: params.account.baseUrl,
-          accountId: params.account.accountId,
-          to: params.target,
-          text,
-          senderId: params.account.botUserId,
-          senderName: params.account.botDisplayName,
-          threadId: params.inbound.threadId,
-          replyToId: params.inbound.id,
-          toolCalls: params.toolCalls,
-        });
-        messageId = response.message.id;
-      }
-      currentText = text;
-    });
-    return pending;
+    if (messageId) {
+      await editQaBusMessage({
+        baseUrl: params.account.baseUrl,
+        accountId: params.account.accountId,
+        messageId,
+        text,
+      });
+    } else {
+      const response = await sendQaBusMessage({
+        baseUrl: params.account.baseUrl,
+        accountId: params.account.accountId,
+        to: params.target,
+        text,
+        senderId: params.account.botUserId,
+        senderName: params.account.botDisplayName,
+        threadId: params.inbound.threadId,
+        replyToId: params.inbound.id,
+        toolCalls: params.toolCalls,
+      });
+      messageId = response.message.id;
+    }
+    currentText = text;
   };
 
   const clear = async () => {
-    await pending.catch(() => undefined);
     if (!messageId) {
       return;
     }
@@ -247,43 +246,43 @@ function createQaReplyPreview(params: {
   };
 
   return {
-    clear,
-    async deliver(text: string, kind: string, isError?: boolean, mediaUrls: string[] = []) {
-      await pending;
-      if (mediaUrls.length > 0) {
-        // Tool/block callbacks acknowledge real delivery, not a preview. A new
-        // attachment must survive even when its caption matches an earlier send.
+    clear: () => withPreviewLock(clear),
+    deliver: (text: string, kind: string, isError?: boolean, mediaUrls: string[] = []) =>
+      withPreviewLock(async () => {
+        if (mediaUrls.length > 0) {
+          // Tool/block callbacks acknowledge real delivery, not a preview. A new
+          // attachment must survive even when its caption matches an earlier send.
+          await clear();
+          await sendDurable(text, isError, mediaUrls);
+          return;
+        }
+        if (isError === true) {
+          // Preview edits cannot add the typed failure marker. Replace any preview
+          // with one durable marked message so QA Lab cannot accept it as success.
+          await clear();
+          await sendDurable(text, true);
+          return;
+        }
+        // Core may close a streamed block with an identical final payload.
+        // The block is already durable, so posting the final again duplicates the reply.
+        if (
+          kind === "final" &&
+          text === lastDurableText &&
+          serializeQaToolCallSnapshot(params.toolCalls) === lastDurableToolCallSnapshot
+        ) {
+          // Count equality is not record equality: a same-count final with changed
+          // tool records must still be delivered.
+          await clear();
+          return;
+        }
+        if (kind === "final" && messageId && params.toolCalls.length === 0) {
+          await write(text);
+          return;
+        }
         await clear();
-        await sendDurable(text, isError, mediaUrls);
-        return;
-      }
-      if (isError === true) {
-        // Preview edits cannot add the typed failure marker. Replace any preview
-        // with one durable marked message so QA Lab cannot accept it as success.
-        await clear();
-        await sendDurable(text, true);
-        return;
-      }
-      // Core may close a streamed block with an identical final payload.
-      // The block is already durable, so posting the final again duplicates the reply.
-      if (
-        kind === "final" &&
-        text === lastDurableText &&
-        serializeQaToolCallSnapshot(params.toolCalls) === lastDurableToolCallSnapshot
-      ) {
-        // Count equality is not record equality: a same-count final with changed
-        // tool records must still be delivered.
-        await clear();
-        return;
-      }
-      if (kind === "final" && messageId && params.toolCalls.length === 0) {
-        await write(text);
-        return;
-      }
-      await clear();
-      await sendDurable(text);
-    },
-    update: write,
+        await sendDurable(text);
+      }),
+    update: (text: string) => withPreviewLock(() => write(text)),
   };
 }
 

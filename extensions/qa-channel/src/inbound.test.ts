@@ -99,34 +99,37 @@ describe("handleQaInbound", () => {
     vi.clearAllMocks();
   });
 
-  it("delivers generated image bytes and their caption in one final bus message", async () => {
-    const runtime = createPluginRuntimeMock();
-    setQaChannelRuntime(runtime);
-    const mediaPath = path.join(process.cwd(), "qa-channel-inbound-generated.png");
+  it.each(["tool", "block", "final"] as const)(
+    "delivers image bytes and caption for %s delivery",
+    async (kind) => {
+      const runtime = createPluginRuntimeMock();
+      setQaChannelRuntime(runtime);
+      const mediaPath = path.join(process.cwd(), "qa-channel-inbound-generated.png");
 
-    await handleQaInbound(createQaInboundParams());
-    const assembled = firstRunAssembledParams(runtime);
-    await assembled.delivery.deliver(
-      { text: "Here is your generated image.", mediaUrls: [mediaPath] },
-      { kind: "final" },
-    );
+      await handleQaInbound(createQaInboundParams());
+      const assembled = firstRunAssembledParams(runtime);
+      await assembled.delivery.deliver(
+        { text: "Here is your generated image.", mediaUrls: [mediaPath] },
+        { kind },
+      );
 
-    expect(loadOutboundMediaFromUrl).toHaveBeenCalledOnce();
-    expect(sendQaBusMessage).toHaveBeenCalledOnce();
-    expect(sendQaBusMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        text: "Here is your generated image.",
-        replyToId: "msg-1",
-        attachments: [
-          expect.objectContaining({
-            kind: "image",
-            mimeType: "image/png",
-            contentBase64: QA_GENERATED_IMAGE_BASE64,
-          }),
-        ],
-      }),
-    );
-  });
+      expect(loadOutboundMediaFromUrl).toHaveBeenCalledOnce();
+      expect(sendQaBusMessage).toHaveBeenCalledOnce();
+      expect(sendQaBusMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: "Here is your generated image.",
+          replyToId: "msg-1",
+          attachments: [
+            expect.objectContaining({
+              kind: "image",
+              mimeType: "image/png",
+              contentBase64: QA_GENERATED_IMAGE_BASE64,
+            }),
+          ],
+        }),
+      );
+    },
+  );
 
   it("publishes partial replies as one edited preview before final delivery", async () => {
     const runtime = createPluginRuntimeMock();
@@ -219,37 +222,161 @@ describe("handleQaInbound", () => {
     );
   });
 
-  it("delivers identical block and final replies exactly once", async () => {
+  it.each([false, true])(
+    "delivers identical block and final replies exactly once (media: %s)",
+    async (withMedia) => {
+      const runtime = createPluginRuntimeMock();
+      setQaChannelRuntime(runtime);
+
+      await handleQaInbound(createQaInboundParams());
+
+      const assembled = firstRunAssembledParams(runtime);
+      await assembled.delivery.deliver(
+        { text: "single answer", ...(withMedia ? { mediaUrl: "/tmp/answer.png" } : {}) },
+        { kind: "block" },
+      );
+      await assembled.delivery.deliver({ text: "single answer" }, { kind: "final" });
+
+      expect(sendQaBusMessage).toHaveBeenCalledOnce();
+      expect(sendQaBusMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ text: "single answer" }),
+      );
+    },
+  );
+
+  it.each([false, true])(
+    "delivers an identical final when it adds tool-call trace data (media: %s)",
+    async (withMedia) => {
+      const runtime = createPluginRuntimeMock();
+      setQaChannelRuntime(runtime);
+
+      await handleQaInbound(createQaInboundParams());
+
+      const assembled = firstRunAssembledParams(runtime);
+      await assembled.delivery.deliver(
+        { text: "single answer", ...(withMedia ? { mediaUrl: "/tmp/answer.png" } : {}) },
+        { kind: "block" },
+      );
+      await assembled.replyOptions?.onToolStart?.({ phase: "start", name: "search" });
+      await assembled.delivery.deliver({ text: "single answer" }, { kind: "final" });
+
+      expect(sendQaBusMessage).toHaveBeenCalledTimes(2);
+      expect(sendQaBusMessage).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ text: "single answer", toolCalls: [{ name: "search" }] }),
+      );
+    },
+  );
+
+  it("retains the delivered media tool trace while suppressing its matching text final", async () => {
     const runtime = createPluginRuntimeMock();
     setQaChannelRuntime(runtime);
-
     await handleQaInbound(createQaInboundParams());
-
     const assembled = firstRunAssembledParams(runtime);
-    await assembled.delivery.deliver({ text: "single answer" }, { kind: "block" });
+    await assembled.replyOptions?.onToolStart?.({ phase: "start", name: "image" });
+    await assembled.delivery.deliver(
+      { text: "single answer", mediaUrl: "/tmp/answer.png" },
+      { kind: "block" },
+    );
     await assembled.delivery.deliver({ text: "single answer" }, { kind: "final" });
 
+    expect(sendQaBusMessage).toHaveBeenCalledOnce();
+    expect(sendQaBusMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "single answer",
+        toolCalls: [{ name: "image" }],
+        attachments: [expect.objectContaining({ contentBase64: QA_GENERATED_IMAGE_BASE64 })],
+      }),
+    );
+  });
+
+  it("does not suppress the final caption after a failed media delivery", async () => {
+    const runtime = createPluginRuntimeMock();
+    setQaChannelRuntime(runtime);
+    await handleQaInbound(createQaInboundParams());
+    const assembled = firstRunAssembledParams(runtime);
+    vi.mocked(loadOutboundMediaFromUrl).mockRejectedValueOnce(new Error("media too large"));
+    await expect(
+      assembled.delivery.deliver(
+        { text: "single answer", mediaUrl: "/tmp/answer.png" },
+        { kind: "block" },
+      ),
+    ).rejects.toThrow("media too large");
+    expect(sendQaBusMessage).not.toHaveBeenCalled();
+    await assembled.delivery.deliver({ text: "single answer" }, { kind: "final" });
     expect(sendQaBusMessage).toHaveBeenCalledOnce();
     expect(sendQaBusMessage).toHaveBeenCalledWith(
       expect.objectContaining({ text: "single answer" }),
     );
   });
 
-  it("delivers an identical final when it adds tool-call trace data", async () => {
+  it("keeps captionless media and a subsequent text final", async () => {
     const runtime = createPluginRuntimeMock();
     setQaChannelRuntime(runtime);
-
     await handleQaInbound(createQaInboundParams());
+    const assembled = firstRunAssembledParams(runtime);
+    await assembled.delivery.deliver({ mediaUrl: "/tmp/answer.png" }, { kind: "block" });
+    await assembled.delivery.deliver({ text: "single answer" }, { kind: "final" });
+    expect(sendQaBusMessage).toHaveBeenCalledTimes(2);
+    expect(sendQaBusMessage).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        text: "",
+        attachments: [expect.objectContaining({ contentBase64: QA_GENERATED_IMAGE_BASE64 })],
+      }),
+    );
+    expect(sendQaBusMessage).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ text: "single answer" }),
+    );
+  });
 
+  it("retains tool calls started while media is loading in the later final", async () => {
+    const runtime = createPluginRuntimeMock();
+    setQaChannelRuntime(runtime);
+    await handleQaInbound(createQaInboundParams());
+    const assembled = firstRunAssembledParams(runtime);
+    await assembled.replyOptions?.onToolStart?.({ phase: "start", name: "image" });
+    vi.mocked(loadOutboundMediaFromUrl).mockImplementationOnce(async () => {
+      await assembled.replyOptions?.onToolStart?.({ phase: "start", name: "search" });
+      return {
+        buffer: Buffer.from(QA_GENERATED_IMAGE_BASE64, "base64"),
+        kind: "image",
+        contentType: "image/png",
+      };
+    });
+    await assembled.delivery.deliver(
+      { text: "single answer", mediaUrl: "/tmp/answer.png" },
+      { kind: "block" },
+    );
+    await assembled.delivery.deliver({ text: "single answer" }, { kind: "final" });
+    expect(sendQaBusMessage).toHaveBeenCalledTimes(2);
+    expect(sendQaBusMessage).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ toolCalls: [{ name: "image" }] }),
+    );
+    expect(sendQaBusMessage).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ toolCalls: [{ name: "image" }, { name: "search" }] }),
+    );
+  });
+
+  it("delivers a new attachment even when its caption was already sent", async () => {
+    const runtime = createPluginRuntimeMock();
+    setQaChannelRuntime(runtime);
+    await handleQaInbound(createQaInboundParams());
     const assembled = firstRunAssembledParams(runtime);
     await assembled.delivery.deliver({ text: "single answer" }, { kind: "block" });
-    await assembled.replyOptions?.onToolStart?.({ phase: "start", name: "search" });
-    await assembled.delivery.deliver({ text: "single answer" }, { kind: "final" });
-
+    await assembled.delivery.deliver(
+      { text: "single answer", mediaUrl: "/tmp/answer.png" },
+      { kind: "final" },
+    );
     expect(sendQaBusMessage).toHaveBeenCalledTimes(2);
     expect(sendQaBusMessage).toHaveBeenNthCalledWith(
       2,
-      expect.objectContaining({ text: "single answer", toolCalls: [{ name: "search" }] }),
+      expect.objectContaining({
+        attachments: [expect.objectContaining({ contentBase64: QA_GENERATED_IMAGE_BASE64 })],
+      }),
     );
   });
 
@@ -293,7 +420,7 @@ describe("handleQaInbound", () => {
     if (!toolCalls?.[0]) {
       throw new Error("expected durable tool-call trace");
     }
-    toolCalls[0] = { name: "search", arguments: { attempt: 2 } };
+    toolCalls[0].arguments = { attempt: 2 };
     await assembled.delivery.deliver({ text: "single answer" }, { kind: "final" });
 
     expect(sendQaBusMessage).toHaveBeenCalledTimes(2);

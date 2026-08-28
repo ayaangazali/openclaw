@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import type { Context, Model } from "@openclaw/llm-core";
 import OpenAI from "openai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../../../test/helpers/promise.js";
 import { configureAiTransportHost, getAiTransportHost } from "../host.js";
 import { createOpenAIResponsesTransportStreamFn } from "./openai-responses-client.js";
 import { requestPreparedOpenAIResponsesCompaction } from "./openai-responses-compact-request.js";
@@ -21,7 +22,7 @@ const compacted = {
 
 describe("prepared Responses compaction HTTP lifetime", () => {
   it("settles pending reads and releases the body when the consumer cancels", async () => {
-    const { promise: pulling, resolve: started } = Promise.withResolvers<void>();
+    const { promise: pulling, resolve: started } = createDeferred();
     const cancel = vi.fn(() => new Promise<void>(() => {}));
     const body = new ReadableStream<Uint8Array>({
       pull() {
@@ -81,7 +82,7 @@ describe("prepared Responses compaction HTTP lifetime", () => {
     const abortController = new AbortController();
     const requestPaths: string[] = [];
     let watchdogFired = false;
-    const { promise: headersReceived, resolve: firstHeaders } = Promise.withResolvers<void>();
+    const { promise: headersReceived, resolve: firstHeaders } = createDeferred();
     configureAiTransportHost({
       resolveModelRequestTimeoutMs: () => (mode === "host-timeout" ? timeoutMs : undefined),
       buildModelFetch: () => async (input, init) => {

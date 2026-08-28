@@ -26,6 +26,10 @@ import {
   type OpenAIResponsesReplayMode,
 } from "./openai-responses-compaction-replay.js";
 import {
+  isOpenAIResponsesCompactionOutput,
+  readOpenAIResponsesCompactionResponse,
+} from "./openai-responses-compaction-window.js";
+import {
   claimOpenAIResponsesHttpContinuation,
   type ResponsesContinuationRequest,
 } from "./openai-responses-continuation.js";
@@ -183,25 +187,19 @@ async function postOpenAIResponsesCompaction(params: {
           ...(params.request.input ?? []),
         ]
       : params.request.input;
-  const response = await params.client.post<unknown>("/responses/compact", {
-    ...buildOpenAISdkRequestOptions(params.model, params.options?.signal, {
-      timeoutMs: params.options?.timeoutMs,
-      maxRetries: params.options?.maxRetries,
-    }),
-    body: { model: params.request.model, input: compactInput },
-  });
+  const rawResponse = await params.client
+    .post<unknown>("/responses/compact", {
+      ...buildOpenAISdkRequestOptions(params.model, params.options?.signal, {
+        timeoutMs: params.options?.timeoutMs,
+        maxRetries: params.options?.maxRetries,
+      }),
+      body: { model: params.request.model, input: compactInput },
+    })
+    .asResponse();
+  const response = await readOpenAIResponsesCompactionResponse(rawResponse);
   const output = isRecord(response) && Array.isArray(response.output) ? response.output : [];
   const item = output.at(-1);
   const retainedItems = output.slice(0, -1);
-  const retainedMessagesAreValid = retainedItems.every(
-    (candidate) =>
-      isRecord(candidate) &&
-      candidate.type === "message" &&
-      (candidate.role === "user" ||
-        candidate.role === "developer" ||
-        candidate.role === "system") &&
-      Array.isArray(candidate.content),
-  );
   const retainedUserMessageCount = retainedItems.filter(
     (candidate) =>
       isRecord(candidate) &&
@@ -220,7 +218,7 @@ async function postOpenAIResponsesCompaction(params: {
   if (
     !isRecord(response) ||
     response.object !== "response.compaction" ||
-    !retainedMessagesAreValid ||
+    !isOpenAIResponsesCompactionOutput(output, params.model) ||
     (retainedItems.length > 0 &&
       (!retainedMessagePrefixSupported || retainedUserMessageCount !== inputUserMessageCount)) ||
     !isRecord(item) ||
@@ -234,6 +232,7 @@ async function postOpenAIResponsesCompaction(params: {
     throw new Error("Responses compact endpoint did not return one trailing compaction item");
   }
   return {
+    output,
     item,
     historyMode: retainedUserMessageCount > 0 ? "retained-users" : "compacted-prefix",
     usage,

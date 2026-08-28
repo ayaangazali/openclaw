@@ -63,15 +63,10 @@ function wrapResponses(options: { fastMode?: boolean; clientVersion?: string }):
 beforeEach(() => {
   sdkState.clients.length = 0;
   sdkState.post.mockReset();
-  sdkState.post.mockReturnValue({
-    asResponse: async () =>
-      new Response(
-        JSON.stringify({
-          object: "response.compaction",
-          output: [{ type: "compaction", id: "cmp_1", encrypted_content: "opaque" }],
-          usage: { input_tokens: 1_000, output_tokens: 200 },
-        }),
-      ),
+  sdkState.post.mockResolvedValue({
+    object: "response.compaction",
+    output: [{ type: "compaction", id: "cmp_1", encrypted_content: "opaque" }],
+    usage: { input_tokens: 1_000, output_tokens: 200 },
   });
 });
 

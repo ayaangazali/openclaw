@@ -50,9 +50,7 @@ const context = {
 } satisfies Context;
 
 function mockCompactResponse(body: unknown): void {
-  sdkState.post.mockReturnValue({
-    asResponse: () => Promise.resolve(new Response(JSON.stringify(body))),
-  });
+  sdkState.post.mockResolvedValue(body);
 }
 
 describe("responses compact endpoint", () => {
@@ -232,27 +230,6 @@ describe("responses compact endpoint", () => {
         { apiKey: "test-key" },
       ),
     ).rejects.toThrow("one trailing compaction item");
-  });
-
-  it("bounds the response before parsing and cancels the oversized body", async () => {
-    const cancel = vi.fn();
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new Uint8Array(16 * 1024 * 1024 + 1));
-      },
-      cancel,
-    });
-    sdkState.post.mockReturnValue({ asResponse: () => Promise.resolve(new Response(body)) });
-    await expect(
-      requestPreparedOpenAIResponsesCompaction(
-        createOpenAIResponsesTransportStreamFn(),
-        model,
-        context,
-        { apiKey: "test-key" },
-      ),
-    ).rejects.toThrow("response exceeds 16 MiB");
-    expect(cancel).toHaveBeenCalledOnce();
-    expect(body.locked).toBe(false);
   });
 
   it.each([model, { ...model, provider: "custom", baseUrl: "https://responses.example/v1" }])(

@@ -26,8 +26,8 @@ import {
   type OpenAIResponsesReplayMode,
 } from "./openai-responses-compaction-replay.js";
 import {
+  createBoundedOpenAIResponsesCompactionFetch,
   isOpenAIResponsesCompactionOutput,
-  readOpenAIResponsesCompactionResponse,
 } from "./openai-responses-compaction-window.js";
 import {
   claimOpenAIResponsesHttpContinuation,
@@ -163,13 +163,14 @@ export function createOpenAIResponsesClient(
   optionHeaders?: Record<string, string>,
   turnHeaders?: Record<string, string>,
   sessionId?: string,
+  fetchOverride?: typeof globalThis.fetch,
 ) {
   return new OpenAI({
     apiKey,
     baseURL: resolveOpenAIClientBaseUrl(model),
     dangerouslyAllowBrowser: true,
     defaultHeaders: buildOpenAIClientHeaders(model, context, optionHeaders, turnHeaders, sessionId),
-    fetch: buildGuardedModelFetch(model),
+    fetch: fetchOverride ?? buildGuardedModelFetch(model),
     ...buildOpenAISdkClientOptions(model),
   });
 }
@@ -187,16 +188,13 @@ async function postOpenAIResponsesCompaction(params: {
           ...(params.request.input ?? []),
         ]
       : params.request.input;
-  const rawResponse = await params.client
-    .post<unknown>("/responses/compact", {
-      ...buildOpenAISdkRequestOptions(params.model, params.options?.signal, {
-        timeoutMs: params.options?.timeoutMs,
-        maxRetries: params.options?.maxRetries,
-      }),
-      body: { model: params.request.model, input: compactInput },
-    })
-    .asResponse();
-  const response = await readOpenAIResponsesCompactionResponse(rawResponse);
+  const response = await params.client.post<unknown>("/responses/compact", {
+    ...buildOpenAISdkRequestOptions(params.model, params.options?.signal, {
+      timeoutMs: params.options?.timeoutMs,
+      maxRetries: params.options?.maxRetries,
+    }),
+    body: { model: params.request.model, input: compactInput },
+  });
   const output = isRecord(response) && Array.isArray(response.output) ? response.output : [];
   const item = output.at(-1);
   const retainedItems = output.slice(0, -1);
@@ -314,6 +312,9 @@ function createResponsesTransportExecutor(config: ResponsesTransportExecutorOpti
           options?.headers,
           turnState?.headers,
           options?.sessionId,
+          compactRequest
+            ? createBoundedOpenAIResponsesCompactionFetch(buildGuardedModelFetch(model))
+            : undefined,
         );
         const buildRequest = async (replayMode: OpenAIResponsesReplayMode) => {
           let params = config.buildRequest(
@@ -685,6 +686,8 @@ export function createAzureOpenAIClient(
   apiKey: string,
   optionHeaders?: Record<string, string>,
   turnHeaders?: Record<string, string>,
+  _sessionId?: string,
+  fetchOverride?: typeof globalThis.fetch,
 ) {
   const baseURL = normalizeAzureBaseUrl(model.baseUrl);
   const clientOptions = {
@@ -692,7 +695,7 @@ export function createAzureOpenAIClient(
     dangerouslyAllowBrowser: true,
     defaultHeaders: buildOpenAIClientHeaders(model, context, optionHeaders, turnHeaders),
     baseURL,
-    fetch: buildGuardedModelFetch(model),
+    fetch: fetchOverride ?? buildGuardedModelFetch(model),
     ...buildOpenAISdkClientOptions(model),
   };
 

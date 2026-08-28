@@ -1,4 +1,5 @@
 import { createPluginRuntimeMock } from "openclaw/plugin-sdk/channel-test-helpers";
+import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setQaChannelRuntime } from "../api.js";
 import {
@@ -35,8 +36,8 @@ describe("QA reply preview lifecycle", () => {
     async (partialText) => {
       const messages = new Map<string, QaBusMessage>();
       const deleted = new Set<string>();
-      const deleteStarted = Promise.withResolvers<void>();
-      const deleteAcknowledged = Promise.withResolvers<void>();
+      const deleteStarted = createDeferred<void>();
+      const deleteAcknowledged = createDeferred<void>();
       const liveMessage = (id: string) => {
         const message = messages.get(id);
         if (!message || deleted.has(id)) {

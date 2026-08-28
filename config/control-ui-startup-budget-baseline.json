@@ -1,5 +1,5 @@
 {
-  "startupJsGzipBytes": 346461,
-  "reason": "standing-grant scope line + grants ledger (#131602); recorded at the CI e2e-lane build (346461 B) — checks-ui and local builds of the same tree measure ~600 B less, beyond the 64 B variance allowance",
+  "startupJsGzipBytes": 347423,
+  "reason": "twelve Control UI fixes landed after the #131602 baseline (b9e0c66e090 side-panel loading states through 293699e0bf9 mobile Inbox polish); measured 347423 B locally and 347430 B on the CI build-artifacts lane of UI-neutral PR #132108",
   "updatedAt": "2026-08-28"
 }

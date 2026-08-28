@@ -85,6 +85,7 @@ describe("handleEmbeddedPromptFailure", () => {
         },
       });
       expect(recoveryText).toContain("/compact");
+      // oxlint-disable-next-line unicorn/prefer-structured-clone -- Verify JSON transport serialization, not an in-memory clone.
       expect(JSON.parse(JSON.stringify(outcome))).toMatchObject({
         result: { payloads: [{ text: recoveryText, isError: true }] },
       });

@@ -1,3 +1,4 @@
+import { hasOnlyAssistantReasoningContent } from "@openclaw/ai/internal/shared";
 import { formatErrorMessage, toErrorObject } from "../../../infra/errors.js";
 import type { AssistantMessage } from "../../../llm/types.js";
 import { isRetryableAssistantError } from "../../../llm/utils/retry.js";
@@ -6,7 +7,6 @@ import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../../defaults.js";
 import type { FailoverReason } from "../../embedded-agent-helpers.js";
 import { LiveSessionModelSwitchError } from "../../live-model-switch-error.js";
 import { shouldSwitchToLiveModel, clearLiveModelSwitchPending } from "../../live-model-switch.js";
-import { hasOnlyAssistantReasoningContent } from "../../replay-turn-classification.js";
 import type { normalizeUsage } from "../../usage.js";
 import { log } from "../logger.js";
 import { getEmbeddedSessionPromptState } from "../session-prompt-state.js";

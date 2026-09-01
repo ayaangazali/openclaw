@@ -1,7 +1,16 @@
 // Control UI tests cover models behavior.
 import { describe, expect, it, vi } from "vitest";
 import type { GatewayBrowserClient } from "../api/gateway.ts";
-import { invalidateModelCatalogCache, loadModels } from "./model-catalog-store.ts";
+import {
+  peekChatMetadata,
+  loadChatMetadata,
+  beginChatMetadataPublication,
+  subscribeChatMetadata,
+} from "./chat/chat-metadata-store.ts";
+import { invalidateModelCatalogCache, loadModelCatalog } from "./model-catalog-store.ts";
+
+const loadModels = async (...args: Parameters<typeof loadModelCatalog>) =>
+  (await loadModelCatalog(...args)).models;
 
 describe("loadModels", () => {
   it("requests the configured model list view", async () => {
@@ -37,6 +46,50 @@ describe("loadModels", () => {
       agentId: "main",
       preparedOnly: true,
     });
+  });
+
+  it("revalidates existing metadata after explicit account-model discovery", async () => {
+    const prepared = [{ id: "prepared", name: "Prepared", provider: "openai" }];
+    const discovered = [
+      ...prepared,
+      { id: "discovered", name: "Discovered", provider: "openai", contextWindow: 262_144 },
+    ];
+    const request = vi.fn(async (method: string) => ({
+      models: discovered,
+      ...(method === "chat.metadata" ? { commands: [] } : {}),
+    }));
+    const client = { request } as unknown as GatewayBrowserClient;
+    beginChatMetadataPublication(client, { agentId: "main" }).publish({
+      commands: [],
+      models: prepared,
+    });
+    const listener = vi.fn((update: { type: string }) => {
+      if (update.type === "invalidated") {
+        void loadChatMetadata(client, { agentId: "main" });
+      }
+    });
+    const unsubscribe = subscribeChatMetadata(client, { agentId: "main" }, listener);
+
+    await loadModels(client, { agentId: "main" });
+
+    await vi.waitFor(() =>
+      expect(peekChatMetadata(client, { agentId: "main" })?.models).toEqual(discovered),
+    );
+    expect(request).toHaveBeenCalledWith("chat.metadata", { agentId: "main" });
+    expect(listener.mock.calls.filter(([update]) => update.type === "result")).toHaveLength(1);
+    unsubscribe();
+  });
+
+  it("does not revalidate metadata for automatic prepared-only catalog reads", async () => {
+    const models = [{ id: "prepared", name: "Prepared", provider: "openai" }];
+    const request = vi.fn(async () => ({ models }));
+    const client = { request } as unknown as GatewayBrowserClient;
+    beginChatMetadataPublication(client, { agentId: "main" }).publish({ commands: [], models });
+
+    await loadModels(client, { agentId: "main", preparedOnly: true });
+
+    expect(request).toHaveBeenCalledOnce();
+    expect(request).not.toHaveBeenCalledWith("chat.metadata", expect.anything());
   });
 
   it("reuses the configured model list while the cache is fresh", async () => {
@@ -139,6 +192,114 @@ describe("loadModels", () => {
 
     expect(request).toHaveBeenCalledTimes(2);
   });
+
+  it("keeps a shared refresh alive until its final subscriber aborts", async () => {
+    let requestSignal: AbortSignal | undefined;
+    const request = vi.fn(
+      async (_method: string, _params: unknown, options?: { signal?: AbortSignal }) => {
+        const signal = options?.signal;
+        if (!signal) {
+          throw new Error("expected a cancellable model-catalog request");
+        }
+        requestSignal = signal;
+        return await new Promise<never>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () =>
+              reject(
+                signal.reason instanceof Error
+                  ? signal.reason
+                  : new DOMException("model catalog request aborted", "AbortError"),
+              ),
+            { once: true },
+          );
+        });
+      },
+    );
+    const client = { request } as unknown as GatewayBrowserClient;
+    const firstAbort = new AbortController();
+    const secondAbort = new AbortController();
+    const firstReason = new DOMException("first page retired", "AbortError");
+    const secondReason = new DOMException("last page retired", "AbortError");
+
+    const first = loadModels(client, {
+      agentId: "writer",
+      refresh: true,
+      signal: firstAbort.signal,
+    });
+    const second = loadModels(client, {
+      agentId: "writer",
+      refresh: true,
+      signal: secondAbort.signal,
+    });
+    await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
+
+    firstAbort.abort(firstReason);
+    await expect(first).rejects.toBe(firstReason);
+    expect(requestSignal?.aborted).toBe(false);
+
+    secondAbort.abort(secondReason);
+    await expect(second).rejects.toBe(secondReason);
+    expect(requestSignal?.aborted).toBe(true);
+    expect(request).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { label: "explicit refresh", refresh: { refresh: true } },
+    { label: "picker refresh", refresh: { refreshIfDue: true } },
+  ])(
+    "starts a replacement $label when the retired request is already aborted",
+    async (testCase) => {
+      const fresh = [{ id: "fresh", name: "Fresh", provider: "openai" }];
+      let requestCount = 0;
+      const request = vi.fn(
+        (_method: string, _params: unknown, options?: { signal?: AbortSignal }) => {
+          const signal = options?.signal;
+          if (!signal) {
+            throw new Error("expected a cancellable model-catalog request");
+          }
+          requestCount += 1;
+          if (requestCount > 1) {
+            return Promise.resolve({ models: fresh });
+          }
+          return new Promise<never>((_resolve, reject) => {
+            signal.addEventListener(
+              "abort",
+              () =>
+                reject(
+                  signal.reason instanceof Error
+                    ? signal.reason
+                    : new DOMException("model catalog request aborted", "AbortError"),
+                ),
+              { once: true },
+            );
+          });
+        },
+      );
+      const client = { request } as unknown as GatewayBrowserClient;
+      const retired = new AbortController();
+      const replacementTask = new AbortController();
+      const reason = new DOMException("page retired", "AbortError");
+      const first = loadModels(client, {
+        agentId: "writer",
+        ...testCase.refresh,
+        signal: retired.signal,
+      });
+      const firstResult = first.catch((error: unknown) => error);
+      await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
+
+      retired.abort(reason);
+      const replacement = loadModels(client, {
+        agentId: "writer",
+        ...testCase.refresh,
+        signal: replacementTask.signal,
+      });
+
+      expect(await firstResult).toBe(reason);
+      await expect(replacement).resolves.toEqual(fresh);
+      expect(request).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it("joins an active picker refresh instead of returning the cooldown cache", async () => {
     const initial = [{ id: "initial", name: "Initial", provider: "openai" }];

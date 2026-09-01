@@ -1,21 +1,17 @@
 // Resolves or installs channel plugins needed by setup/onboarding flows.
 import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
-import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import {
   listRawChannelPluginCatalogEntries,
   type ChannelPluginCatalogEntry,
 } from "../../channels/plugins/catalog.js";
-import {
-  getChannelPlugin,
-  getLoadedChannelPlugin,
-  normalizeChannelId,
-} from "../../channels/plugins/index.js";
+import { getLoadedChannelPlugin, normalizeChannelId } from "../../channels/plugins/index.js";
 import type { ChannelPlugin } from "../../channels/plugins/types.plugin.js";
 import type { ChannelId } from "../../channels/plugins/types.public.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { RuntimeEnv } from "../../runtime.js";
 import { createClackPrompter } from "../../wizard/clack-prompter.js";
 import type { WizardPrompter } from "../../wizard/prompts.js";
+import { resolveChannelSetupOwner } from "./owner.js";
 import {
   ensureChannelSetupPluginInstalled,
   loadChannelSetupPluginRegistrySnapshotForChannel,
@@ -39,10 +35,6 @@ type ResolveInstallableChannelPluginResult = {
   pluginInstalled: boolean;
   supportsRequestedCapability?: boolean;
 };
-
-function resolveWorkspaceDir(cfg: OpenClawConfig, agentId?: string) {
-  return resolveAgentWorkspaceDir(cfg, agentId ?? resolveDefaultAgentId(cfg));
-}
 
 function resolveResolvedChannelId(params: {
   rawChannel?: string | null;
@@ -144,7 +136,8 @@ export async function resolveInstallableChannelPlugin(params: {
     };
   }
 
-  const workspaceDir = resolveWorkspaceDir(nextCfg, params.agentId);
+  // Installation may replace config, but discovery must retain this operation's workspace.
+  const { workspaceDir } = resolveChannelSetupOwner(nextCfg, params.agentId);
   const catalogEntry =
     (params.rawChannel
       ? resolveCatalogChannelEntry(params.rawChannel, nextCfg, workspaceDir)
@@ -170,7 +163,9 @@ export async function resolveInstallableChannelPlugin(params: {
     };
   }
 
-  const existing = getChannelPlugin(channelId);
+  // Bundled plugin metadata is not runtime-bound; load it through the scoped registry
+  // before returning a plugin that callers can execute.
+  const existing = getLoadedChannelPlugin(channelId);
   if (existing) {
     return {
       cfg: nextCfg,
@@ -222,7 +217,7 @@ export async function resolveInstallableChannelPlugin(params: {
             channelId,
             supports,
             pluginId: installedPluginId,
-            workspaceDir: resolveWorkspaceDir(nextCfg, params.agentId),
+            workspaceDir,
           })
         : undefined;
       return {

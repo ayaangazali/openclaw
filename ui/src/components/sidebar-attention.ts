@@ -8,19 +8,19 @@ import type { NavigationRouteId } from "../app-navigation.ts";
 import { applicationContext, type ApplicationContext } from "../app/context.ts";
 import type { ExecApprovalDecision } from "../app/exec-approval.ts";
 import {
-  hasNativeUpdateBridge,
   NATIVE_UPDATE_AVAILABILITY_CHANGED_EVENT,
   NATIVE_UPDATE_DECLINED_EVENT,
 } from "../app/native-link-routing.ts";
-import { confirmAndStartUpdate, type UpdateProgress } from "../app/update-confirmation.ts";
-import { isUpdateActionable } from "../app/update-overlay-helpers.ts";
+import type { UpdateProgress } from "../app/update-confirmation.ts";
 import { t } from "../i18n/index.ts";
-import { createInitialCronState, loadCronJobsPage } from "../lib/cron/index.ts";
+import { normalizeAgentLabel } from "../lib/agents/display.ts";
+import { createInitialCronState, loadCronJobsPage, loadCronStatus } from "../lib/cron/index.ts";
 import { canCallGatewayMethod } from "../lib/gateway-methods.ts";
 import { loadModelAuthStatus } from "../lib/model-auth.ts";
+import { normalizeAgentId } from "../lib/sessions/session-key.ts";
 import { OpenClawLightDomElement } from "../lit/openclaw-element.ts";
 import { SubscriptionsController } from "../lit/subscriptions-controller.ts";
-import "../styles/sidebar-footer-update.css";
+import "../styles/sidebar-attention-floating.css";
 import { icons } from "./icons.ts";
 import { CUSTODIAN_PANEL_TOGGLE_EVENT } from "./panel-toggle-contract.ts";
 import {
@@ -28,16 +28,15 @@ import {
   dismissSidebarAttention,
   dismissalStoreKey,
   isSidebarAttentionDismissed,
-  isUpdateAttentionForced,
   loadDismissals,
   reconcileSidebarAttentionDismissals,
-  resolveUpdateAttentionDismissal,
   type SidebarAttentionDismissals,
 } from "./sidebar-attention-dismissals.ts";
 import {
   buildScopeUpgradeInboxEntry,
   buildSidebarInboxEntries,
   buildUpdateInboxEntry,
+  sidebarInboxTabCounts,
   type SidebarAttentionDismissal,
   type SidebarAttentionItem,
   type SidebarInboxEntry,
@@ -47,6 +46,7 @@ import {
   compareSidebarAttentionEntries,
 } from "./sidebar-attention-items.ts";
 import type { SidebarAttentionPanelPosition } from "./sidebar-attention-panel.runtime.ts";
+import { resolveSidebarUpdateAttention } from "./sidebar-attention-update.ts";
 import type { IssueTab } from "./sidebar-issues-tabs.ts";
 import "./tooltip.ts";
 
@@ -54,6 +54,7 @@ type SidebarAttentionPanelRenderer =
   typeof import("./sidebar-attention-panel.runtime.ts").renderSidebarAttentionPanel;
 type SidebarAttentionPanelRuntime = typeof import("./sidebar-attention-panel.runtime.ts");
 type UpdateProgressWatcher = (listener: (progress: UpdateProgress) => void) => () => void;
+type SidebarAttentionAgentScope = { selectedId: string | null; scopeId: string | null };
 
 // A visibility change only refetches a connection-scoped stale snapshot.
 const VISIBILITY_REFRESH_MIN_AGE_MS = 60_000;
@@ -67,6 +68,7 @@ class SidebarAttention extends OpenClawLightDomElement {
   private context?: ApplicationContext;
 
   @state() private cronJobs: CronJob[] = [];
+  @state() private cronSchedulerEnabled: boolean | null = null;
   @state() private modelAuthStatus: ModelAuthStatusResult | null = null;
   @state() private dismissed: SidebarAttentionDismissals = {};
   @state() private panelOpen = false;
@@ -85,7 +87,7 @@ class SidebarAttention extends OpenClawLightDomElement {
 
   private loadedClient: GatewayBrowserClient | null = null;
   private loadedGateway: ApplicationContext["gateway"] | null = null;
-  private loadedAgentId: string | null = null;
+  private loadedAgentScope: SidebarAttentionAgentScope | null = null;
   // Cron events may restart the combined task; retain the committed auth owner so an
   // interrupted agent switch reissues auth instead of displaying the prior agent's alert.
   private modelAuthAgentId: string | null = null;
@@ -95,6 +97,7 @@ class SidebarAttention extends OpenClawLightDomElement {
   private panelTrigger: HTMLElement | null = null;
   private panelRenderer: SidebarAttentionPanelRenderer | null = null;
   private panelLoad: Promise<SidebarAttentionPanelRuntime> | null = null;
+  private panelGeneration = 0;
   private nativeUpdateDeclined = false;
 
   private readonly loadTask = new Task(this, {
@@ -104,36 +107,38 @@ class SidebarAttention extends OpenClawLightDomElement {
       [
         null as ApplicationContext["gateway"] | null,
         null as GatewayBrowserClient | null,
-        null as string | null,
+        null as SidebarAttentionAgentScope | null,
         true as boolean,
       ] as const,
-    task: async ([gateway, client, agentId, refreshModelAuth], { signal }) => {
-      if (!gateway || !client) {
+    task: async ([gateway, client, agentScope, refreshModelAuth], { signal }) => {
+      if (!gateway || !client || !agentScope) {
         return initialState;
       }
       const cron = createInitialCronState({ client, connected: true });
+      cron.cronAgentId = agentScope.scopeId;
       const loads: Promise<unknown>[] = [
-        loadCronJobsPage(cron).then(() => {
+        Promise.all([loadCronJobsPage(cron), loadCronStatus(cron)]).then(() => {
           if (!signal.aborted) {
             this.cronJobs = cron.cronJobs;
+            this.cronSchedulerEnabled = cron.cronStatus?.enabled ?? null;
           }
         }),
       ];
-      if (refreshModelAuth && agentId) {
+      if (refreshModelAuth && agentScope.selectedId) {
         loads.push(
           loadModelAuthStatus(client, {
-            agentId,
+            agentId: agentScope.selectedId,
             signal,
           })
             .catch(() => null)
             .then((modelAuthStatus) => {
               if (!signal.aborted) {
                 this.modelAuthStatus = modelAuthStatus;
-                this.modelAuthAgentId = agentId;
+                this.modelAuthAgentId = agentScope.selectedId;
               }
             }),
         );
-      } else if (!agentId) {
+      } else if (!agentScope.selectedId) {
         this.modelAuthStatus = null;
         this.modelAuthAgentId = null;
       }
@@ -160,7 +165,7 @@ class SidebarAttention extends OpenClawLightDomElement {
       () => {
         const gateway = this.context?.gateway;
         if (gateway) {
-          this.synchronize(gateway);
+          this.synchronize(gateway, { refreshModelAuth: false });
         }
       },
     )
@@ -227,6 +232,9 @@ class SidebarAttention extends OpenClawLightDomElement {
   override connectedCallback() {
     super.connectedCallback();
     this.nativeUpdateDeclined = false;
+    // Dismissal belongs to the connected Inbox, including while its panel imports.
+    document.addEventListener("pointerdown", this.handleOutsideInteraction, true);
+    document.addEventListener("keydown", this.handleOutsideInteraction, true);
     document.addEventListener("visibilitychange", this.refreshIfStale);
     globalThis.addEventListener("storage", this.syncDismissalsFromStorage);
     window.addEventListener(
@@ -238,6 +246,8 @@ class SidebarAttention extends OpenClawLightDomElement {
   }
 
   override disconnectedCallback() {
+    document.removeEventListener("pointerdown", this.handleOutsideInteraction, true);
+    document.removeEventListener("keydown", this.handleOutsideInteraction, true);
     document.removeEventListener("visibilitychange", this.refreshIfStale);
     globalThis.removeEventListener("storage", this.syncDismissalsFromStorage);
     window.removeEventListener(
@@ -245,7 +255,7 @@ class SidebarAttention extends OpenClawLightDomElement {
       this.handleNativeUpdateAvailabilityChanged,
     );
     window.removeEventListener(NATIVE_UPDATE_DECLINED_EVENT, this.handleNativeUpdateDeclined);
-    document.removeEventListener("pointerdown", this.closeOnOutsidePointer, true);
+    this.closePanel(false);
     if (this.idleRefreshTimer !== null) {
       globalThis.clearInterval(this.idleRefreshTimer);
       this.idleRefreshTimer = null;
@@ -254,7 +264,7 @@ class SidebarAttention extends OpenClawLightDomElement {
     void this.loadTask.run([null, null, null, false]);
     this.loadedClient = null;
     this.loadedGateway = null;
-    this.loadedAgentId = null;
+    this.loadedAgentScope = null;
     this.modelAuthAgentId = null;
     super.disconnectedCallback();
   }
@@ -316,28 +326,42 @@ class SidebarAttention extends OpenClawLightDomElement {
       void this.loadTask.run([null, null, null, false]);
       this.loadedClient = null;
       this.loadedGateway = null;
-      this.loadedAgentId = null;
+      this.loadedAgentScope = null;
       this.modelAuthAgentId = null;
       this.cronJobs = [];
+      this.cronSchedulerEnabled = null;
       this.modelAuthStatus = null;
       return;
     }
-    const agentId = this.context?.agentSelection.state.selectedId ?? null;
+    const agentScope: SidebarAttentionAgentScope = {
+      selectedId: this.context?.agentSelection.state.selectedId ?? null,
+      scopeId: this.context?.agentSelection.state.scopeId ?? null,
+    };
+    const loadedAgentScope = this.loadedAgentScope;
     if (
       gateway === this.loadedGateway &&
       snapshot.client === this.loadedClient &&
-      agentId === this.loadedAgentId
+      loadedAgentScope &&
+      agentScope.selectedId === loadedAgentScope.selectedId &&
+      agentScope.scopeId === loadedAgentScope.scopeId
     ) {
       return;
     }
+    if (loadedAgentScope && agentScope.selectedId !== loadedAgentScope.selectedId) {
+      this.modelAuthStatus = null;
+      this.modelAuthAgentId = null;
+    }
+    if (loadedAgentScope && agentScope.scopeId !== loadedAgentScope.scopeId) {
+      this.cronJobs = [];
+    }
     this.loadedGateway = gateway;
     this.loadedClient = snapshot.client;
-    this.loadedAgentId = agentId;
+    this.loadedAgentScope = agentScope;
     void this.loadTask.run([
       gateway,
       snapshot.client,
-      agentId,
-      options.refreshModelAuth !== false || agentId !== this.modelAuthAgentId,
+      agentScope,
+      options.refreshModelAuth !== false || agentScope.selectedId !== this.modelAuthAgentId,
     ]);
   }
 
@@ -352,6 +376,10 @@ class SidebarAttention extends OpenClawLightDomElement {
         entry.dismissal ? [entry.dismissal] : [],
       ),
       gatewayUrl: this.dismissedScope,
+      scope: {
+        cronInventoryComplete: this.loadedAgentScope?.scopeId === null,
+        modelAuthAgentId: this.modelAuthAgentId,
+      },
     });
   }
 
@@ -359,11 +387,15 @@ class SidebarAttention extends OpenClawLightDomElement {
     if (!this.dismissedScope || !this.context) {
       return;
     }
+    const snapshot = this.context.gateway.snapshot;
+    const scopes = snapshot.hello?.auth?.scopes;
     const entry = buildScopeUpgradeInboxEntry({
-      scopes: this.context.gateway.snapshot.hello?.auth?.scopes,
+      scopes,
       state: this.context.scopeUpgrade.state,
     });
-    if (!entry?.dismissal) {
+    // A disconnect makes access unresolved, not resolved. Keep the snooze until
+    // connected scope facts or an active request lifecycle authoritatively retire it.
+    if (snapshot.phase === "connected" && scopes !== undefined && !entry?.dismissal) {
       this.dismissed = clearSidebarAttentionDismissal(this.dismissedScope, "scopeUpgrade");
     }
   }
@@ -378,50 +410,29 @@ class SidebarAttention extends OpenClawLightDomElement {
   private buildAttentionEntries() {
     return buildSidebarAttentionEntries({
       cronJobs: this.cronJobs,
+      cronSchedulerEnabled: this.cronSchedulerEnabled,
+      cronOwnerByJobId: this.cronOwnerByJobId(),
       modelAuthStatus: this.modelAuthStatus,
       modelAuthAgentId: this.modelAuthAgentId,
       now: Date.now(),
     });
   }
 
-  private hasUpdateSurface(): boolean {
-    const snapshot = this.context?.overlays.snapshot;
-    if (!snapshot) {
-      return false;
+  private cronOwnerByJobId(): ReadonlyMap<string, string> | undefined {
+    const selection = this.context?.agentSelection.state;
+    const roster = this.context?.agents?.state.agentsList;
+    if (!selection || selection.scopeId !== null || !roster) {
+      return undefined;
     }
-    const campaign = snapshot.updateSchedule?.campaign;
-    if (snapshot.updateReconciliationPending) {
-      return true;
-    }
-    const canHydrateCampaign = canCallGatewayMethod(
-      this.context?.gateway.snapshot,
-      "update.status",
-      "operator.admin",
+    const namesByAgentId = new Map(
+      roster.agents.map((agent) => [normalizeAgentId(agent.id), normalizeAgentLabel(agent)]),
     );
-    if (campaign && !snapshot.updateCampaignStatusHydrated && canHydrateCampaign) {
-      return Boolean(snapshot.updateRunning || snapshot.updateStatusBanner);
-    }
-    return Boolean(
-      snapshot.updateRunning || snapshot.updateStatusBanner || snapshot.updateAvailable || campaign,
-    );
-  }
-
-  private updateAttentionDismissal() {
-    const snapshot = this.context?.overlays.snapshot;
-    return resolveUpdateAttentionDismissal({
-      gatewayBootId: this.context?.gateway.snapshot.hello?.server?.bootId,
-      updateAvailable: snapshot?.updateAvailable,
-      updateSchedule: snapshot?.updateSchedule,
-    });
-  }
-
-  private updateSurfaceForced(): boolean {
-    const snapshot = this.context?.overlays.snapshot;
-    return (
-      snapshot?.updateRunning ||
-      snapshot?.updateReconciliationPending ||
-      snapshot?.updateSchedule?.campaign?.state === "applying" ||
-      isUpdateAttentionForced(snapshot?.updateStatusBanner?.tone)
+    const defaultId = normalizeAgentId(roster.defaultId);
+    return new Map(
+      this.cronJobs.map((job) => {
+        const ownerId = normalizeAgentId(job.agentId ?? defaultId);
+        return [job.id, namesByAgentId.get(ownerId) ?? ownerId];
+      }),
     );
   }
 
@@ -431,12 +442,14 @@ class SidebarAttention extends OpenClawLightDomElement {
       return [];
     }
     const overlaySnapshot = context.overlays.snapshot;
+    const updateState = resolveSidebarUpdateAttention(context);
     const update = buildUpdateInboxEntry({
-      canDismiss: canCallGatewayMethod(context.gateway.snapshot, "update.run", "operator.admin"),
-      dismissal: this.updateAttentionDismissal(),
-      forced: this.updateSurfaceForced(),
+      canDismiss: updateState.canUpdate,
+      dismissal: updateState.dismissal,
+      forced: updateState.forced,
+      requiresAction: updateState.forced || (updateState.canUpdate && updateState.actionable),
       severity: overlaySnapshot.updateStatusBanner?.tone === "danger" ? "error" : "warning",
-      visible: this.hasUpdateSurface(),
+      visible: updateState.present,
     });
     const scopeUpgrade = buildScopeUpgradeInboxEntry({
       scopes: context.gateway.snapshot.hello?.auth?.scopes,
@@ -456,43 +469,27 @@ class SidebarAttention extends OpenClawLightDomElement {
     );
   }
 
-  private readonly startUpdate = () => {
-    const context = this.context;
-    const snapshot = context?.overlays.snapshot;
-    const campaign = snapshot?.updateSchedule?.campaign;
-    const busy =
-      snapshot?.updateRunning ||
-      snapshot?.updateReconciliationPending ||
-      campaign?.state === "applying";
-    if (
-      !context ||
-      !snapshot ||
-      busy ||
-      !isUpdateActionable(snapshot.updateAvailable, snapshot.updateSchedule, busy) ||
-      !canCallGatewayMethod(context.gateway.snapshot, "update.run", "operator.admin")
-    ) {
-      return;
+  private readonly handleOutsideInteraction = (event: PointerEvent | KeyboardEvent) => {
+    const dismiss =
+      event instanceof KeyboardEvent
+        ? event.key === "Escape" && !this.panelOpen && !event.defaultPrevented
+        : !event.composedPath().includes(this);
+    if (dismiss) {
+      if (event instanceof KeyboardEvent && this.panelTrigger) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      this.closePanel(false);
     }
-    void confirmAndStartUpdate({
-      startGatewayUpdate: () => void context.overlays.runUpdate(),
-      ...(this.watchUpdateProgress ? { watchUpdateProgress: this.watchUpdateProgress } : {}),
-      updateAvailable: snapshot.updateAvailable,
-      updateSchedule: snapshot.updateSchedule,
-      viaNativeApp: !this.nativeUpdateDeclined && hasNativeUpdateBridge(),
-    });
-  };
-
-  private readonly closeOnOutsidePointer = (event: PointerEvent) => {
-    if (!this.panelOpen || event.composedPath().includes(this)) {
-      return;
-    }
-    this.closePanel(false);
   };
 
   private async openPanel(trigger: HTMLElement) {
+    const generation = ++this.panelGeneration;
+    // The pending open owns Escape before its lazy panel can handle keyboard events.
+    this.panelTrigger = trigger;
     this.panelLoad ??= import("./sidebar-attention-panel.runtime.ts");
     const panelRuntime = await this.panelLoad;
-    if (!this.isConnected) {
+    if (!this.isConnected || generation !== this.panelGeneration) {
       return;
     }
     this.context?.scopeUpgrade.activate(panelRuntime.ScopeUpgradeController);
@@ -500,7 +497,6 @@ class SidebarAttention extends OpenClawLightDomElement {
     const width = Math.min(390, globalThis.innerWidth - 16);
     const preferredLeft = rect.left + rect.width / 2 - width / 2;
     const left = Math.max(8, Math.min(preferredLeft, globalThis.innerWidth - width - 8));
-    this.panelTrigger = trigger;
     this.panelRenderer = panelRuntime.renderSidebarAttentionPanel;
     this.panelPosition =
       rect.top < globalThis.innerHeight / 2
@@ -508,25 +504,33 @@ class SidebarAttention extends OpenClawLightDomElement {
         : { left, anchor: "bottom", bottom: Math.max(8, globalThis.innerHeight - rect.top + 8) };
     this.selectedTab = "all";
     this.panelOpen = true;
-    document.addEventListener("pointerdown", this.closeOnOutsidePointer, true);
-    void this.updateComplete.then(() => {
+    await this.updateComplete;
+    if (generation === this.panelGeneration) {
       this.querySelector<HTMLElement>(".sidebar-issues-panel__list")?.focus();
-    });
+    }
   }
 
   private closePanel(restoreFocus: boolean) {
-    if (!this.panelOpen) {
-      return;
-    }
-    const trigger = this.panelTrigger;
+    // Closing also cancels an open that is still waiting for its runtime or render.
+    const generation = ++this.panelGeneration;
+    const trigger = restoreFocus && this.panelOpen ? this.panelTrigger : null;
     this.panelOpen = false;
     this.overflowAbove = false;
     this.overflowBelow = false;
     this.panelTrigger = null;
-    document.removeEventListener("pointerdown", this.closeOnOutsidePointer, true);
-    if (restoreFocus) {
-      void this.updateComplete.then(() => trigger?.focus());
+    if (trigger) {
+      void this.updateComplete.then(() => {
+        if (generation === this.panelGeneration) {
+          trigger.focus();
+        }
+      });
     }
+  }
+
+  dismissPanel(): boolean {
+    const wasOpen = this.panelOpen;
+    this.closePanel(false);
+    return wasOpen;
   }
 
   private readonly syncOverflowCue = () => {
@@ -624,9 +628,10 @@ class SidebarAttention extends OpenClawLightDomElement {
     const row = target.closest<HTMLElement>("[data-approval-id]");
     const rowFocus = row?.querySelector<HTMLElement>("[data-issue-row-focus]") ?? null;
     const rowIndex = rowFocus ? focusOrder.indexOf(rowFocus) : 0;
+    const generation = this.panelGeneration;
     await context.overlays.decideApproval(decision, approvalId);
     await this.updateComplete;
-    if (!this.panelOpen || target.isConnected) {
+    if (generation !== this.panelGeneration || target.isConnected) {
       return;
     }
     const remaining = Array.from(this.querySelectorAll<HTMLElement>("[data-issue-row-focus]"));
@@ -638,24 +643,7 @@ class SidebarAttention extends OpenClawLightDomElement {
       return nothing;
     }
     const entries = this.currentInboxEntries();
-    const updateEntry = entries.find((entry) => entry.type === "update");
-    const updateDismissal = updateEntry?.dismissal ?? null;
-    const overlaySnapshot = this.context.overlays.snapshot;
-    const updateBusy =
-      overlaySnapshot.updateRunning ||
-      overlaySnapshot.updateReconciliationPending ||
-      overlaySnapshot.updateSchedule?.campaign?.state === "applying";
-    const updateActionable = isUpdateActionable(
-      overlaySnapshot.updateAvailable,
-      overlaySnapshot.updateSchedule,
-      updateBusy,
-    );
-    const canUpdate = canCallGatewayMethod(
-      this.context.gateway.snapshot,
-      "update.run",
-      "operator.admin",
-    );
-    const count = entries.length;
+    const count = sidebarInboxTabCounts(entries).all;
     const label = t(count === 1 ? "attention.issueCount" : "attention.issueCountPlural", {
       count: String(count),
     });
@@ -687,39 +675,6 @@ class SidebarAttention extends OpenClawLightDomElement {
             >`
           : nothing}
       </button>
-      ${updateEntry
-        ? html`<span class="sidebar-footer-update-slot">
-            <button
-              type="button"
-              class="sidebar-footer-update"
-              aria-label=${t("updates.sidebar.availableTitle")}
-              ?disabled=${updateBusy || !updateActionable || !canUpdate}
-              @click=${this.startUpdate}
-            >
-              <span class="sidebar-footer-update__icon" aria-hidden="true"
-                >${updateBusy ? icons.refresh : icons.download}</span
-              >
-              <span class="sidebar-footer-update__label">${t("updates.sidebar.action")}</span>
-            </button>
-            ${updateDismissal
-              ? html`<openclaw-tooltip
-                  class="sidebar-hover-tooltip"
-                  .content=${t("updates.sidebar.dismissUntilRestartOrVersion")}
-                  .delay=${600}
-                  .closeDelay=${300}
-                >
-                  <button
-                    type="button"
-                    class="sidebar-footer-update__dismiss"
-                    aria-label=${t("updates.sidebar.dismissUntilRestartOrVersion")}
-                    @click=${() => this.dismiss(updateDismissal)}
-                  >
-                    ${icons.x}
-                  </button>
-                </openclaw-tooltip>`
-              : nothing}
-          </span>`
-        : nothing}
       ${this.panelOpen && this.panelRenderer
         ? this.panelRenderer({
             context: this.context,

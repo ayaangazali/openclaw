@@ -1,4 +1,3 @@
-import { hasOnlyAssistantReasoningContent } from "@openclaw/ai/internal/shared";
 import type { ThinkLevel } from "../../../auto-reply/thinking.js";
 import type { AssistantMessage } from "../../../llm/types.js";
 import { isTerminalAssistantError } from "../../../llm/utils/retry.js";

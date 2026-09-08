@@ -41,7 +41,10 @@ import {
 } from "./agent-tool-metadata.js";
 import type { ToolOutcomeObserver } from "./agent-tools.before-tool-call.js";
 import { finalizeAgentTools } from "./agent-tools.finalize.js";
-import { filterToolsByMessageProvider } from "./agent-tools.message-provider-policy.js";
+import {
+  filterToolsByMessageProvider,
+  messageProviderExcludesTool,
+} from "./agent-tools.message-provider-policy.js";
 import {
   type SkillInstructionDeliveryCache,
   wrapToolMemoryFlushAppendOnlyWrite,
@@ -1080,11 +1083,17 @@ function createOpenClawCodingToolsInternal(options?: OpenClawCodingToolsOptions)
   if (
     isMemoryFlushRun &&
     memoryFlushWritePath &&
-    !authorizedTools.some((tool) => tool.name === "write")
+    !authorizedTools.some((tool) => tool.name === "write") &&
+    // A transport whose allowlist never carries `write`, such as node, is an intended
+    // configuration, not a lost writer, so it stays quiet instead of warning per flush.
+    !messageProviderExcludesTool(
+      options?.toolPolicyMessageProvider ?? options?.messageProvider,
+      "write",
+    )
   ) {
     // Checked on the final authorized list, not the earlier flush surface: tools.deny,
-    // the message-provider allowlist and the rest of the policy pipeline all run after
-    // that surface is built, so a flush can hold `write` there and lose it here.
+    // the model-provider policy and the rest of the pipeline all run after that surface
+    // is built, so a flush can hold `write` there and lose it here.
     // Otherwise the run completes normally, the model reports the save as done, and the
     // memory is lost with no record that it was never persisted. The text names no
     // single config key because any of those filters can be the one that removed it.

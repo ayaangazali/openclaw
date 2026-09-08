@@ -64,6 +64,23 @@ export function isFailedAssistantTurn(message: AssistantTurnLike): boolean {
   );
 }
 
+/** Returns true when an assistant turn carries text a reader would have seen. */
+function hasVisibleAssistantText(message: AssistantTurnLike): boolean {
+  return (
+    Array.isArray(message.content) &&
+    message.content.some(
+      (block) =>
+        typeof block === "object" &&
+        block !== null &&
+        "type" in block &&
+        block.type === "text" &&
+        "text" in block &&
+        typeof block.text === "string" &&
+        block.text.trim().length > 0,
+    )
+  );
+}
+
 /** Returns true when a failed turn still carries tool calls that need pairing repair. */
 export function failedAssistantHasToolCalls(message: AssistantTurnLike): boolean {
   return (
@@ -105,6 +122,13 @@ export function resolveFailedAssistantReplay(
   if (isReasoningOnlyLengthAssistantTurn(message)) {
     // Thinking-only length stops carry provider-owned signatures and no answer text,
     // so they stay dropped rather than replaying an unusable reasoning block.
+    return "drop";
+  }
+  if (!hasVisibleAssistantText(message)) {
+    // Nothing to stand in for. `buildStreamErrorAssistantMessage` always writes
+    // STREAM_ERROR_FALLBACK_TEXT into a failed turn's content, and offline session
+    // repair restores it, so a text-free failed turn carries no visible history and
+    // keeps being dropped.
     return "drop";
   }
   return "marker";

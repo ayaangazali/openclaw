@@ -1,5 +1,5 @@
-import { hasOnlyAssistantReasoningContent } from "@openclaw/ai/internal/shared";
 /** Resolves incomplete-turn payloads, continuation evidence, and run liveness. */
+import { hasOnlyAssistantReasoningContent } from "@openclaw/ai/internal/shared";
 import { isProviderRefusalAssistantError } from "@openclaw/llm-core/diagnostics";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../../../auto-reply/tokens.js";

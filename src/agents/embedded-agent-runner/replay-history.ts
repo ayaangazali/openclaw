@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   hasOnlyAssistantReasoningContent,
   isReasoningOnlyLengthAssistantTurn,
+  isStreamErrorFallbackContent,
 } from "@openclaw/ai/internal/shared";
 import { replaceCompactionReplayOwnerContent } from "@openclaw/ai/transports";
 import { asFiniteNumber as toFiniteCostNumber } from "@openclaw/normalization-core/number-coercion";
@@ -46,7 +47,6 @@ import {
   stripToolResultDetails,
 } from "../session-transcript-repair.js";
 import type { SessionManager } from "../sessions/index.js";
-import { isStreamErrorFallbackContent } from "../stream-message-shared.js";
 import { stripStaleThinkingSignaturesForCompactionReplay } from "../thinking-signatures.js";
 import {
   extractToolCallsFromAssistant,

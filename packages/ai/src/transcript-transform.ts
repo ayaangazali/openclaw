@@ -175,16 +175,13 @@ export function transformMessages<TApi extends Api>(
       message = { ...message, content: [] };
     }
     if (message.role === "assistant") {
+      const failedReplay = resolveFailedAssistantReplay(message, { pairingAware: false });
       message = transformAssistant(message, model, toolCallIdMap, normalizeToolCallId);
       flushToolCalls();
-      const failedReplay = resolveFailedAssistantReplay(message, { pairingAware: false });
       if (failedReplay === "drop") {
         continue;
       }
       if (failedReplay === "marker") {
-        // Dropping a text-only failure leaves the user message before it looking
-        // unanswered, so the model merges it with the next request and can redo work
-        // the turn already did. Same policy the host transport transform applies.
         result.push({
           ...message,
           content: [{ type: "text", text: FAILED_ASSISTANT_REPLAY_TEXT }],

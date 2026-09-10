@@ -1,13 +1,14 @@
-import { resolveModelBoundThinkingReplayMode } from "@openclaw/ai/internal/anthropic";
-import {
-  FAILED_ASSISTANT_REPLAY_TEXT,
-  resolveFailedAssistantReplay,
-} from "@openclaw/ai/internal/shared";
 /**
  * Normalizes transcript messages before provider transport replay. It drops
  * unsafe failed turns, maps tool-call ids across model boundaries, and fills
  * strict provider tool-result gaps when supported.
  */
+import { resolveModelBoundThinkingReplayMode } from "@openclaw/ai/internal/anthropic";
+import {
+  FAILED_ASSISTANT_REPLAY_TEXT,
+  isReasoningOnlyLengthAssistantTurn,
+  resolveFailedAssistantReplay,
+} from "@openclaw/ai/internal/shared";
 import type { Api, Context, Model } from "../llm/types.js";
 import { repairToolUseResultPairing } from "./session-transcript-repair.js";
 
@@ -165,9 +166,9 @@ export function transformTransportMessages(
     if (!original) {
       return [msg];
     }
-    // Same policy the provider-owned converter applies, so a failed turn replays the
-    // same way whichever boundary handles it. Pairing awareness follows requiresPairing so
-    // cross-model async calls keep their errored frames for shared repair.
+    if (isReasoningOnlyLengthAssistantTurn(original)) {
+      return [];
+    }
     switch (resolveFailedAssistantReplay(original, { pairingAware: requiresPairing })) {
       case "drop":
         return [];

@@ -620,10 +620,10 @@ export async function prepareGatewayLifecycle(params: {
     startDiagnosticHeartbeat(undefined, {
       getConfig: getRuntimeConfig,
       startupGraceMs: 60_000,
-      // Recovery reads the current observation; the warning path below reads the
-      // persistent filter, which withholds under 60s of continuous degradation and so
-      // would report a shorter genuine stall as a responsive loop.
-      readEventLoopHealth: readinessEventLoopHealth.snapshot,
+      // Recovery asks the monitor for a verdict that accounts for its own pending sample;
+      // the warning path below reads the persistent filter, which withholds under 60s of
+      // continuous degradation and so would report a shorter genuine stall as healthy.
+      readEventLoopDelayed: readinessEventLoopHealth.eventLoopDelayed,
       sampleLiveness: () => {
         const sample = readinessEventLoopHealth.persistentDegradationSnapshot();
         if (!sample || sample.degradedSinceMs == null) {

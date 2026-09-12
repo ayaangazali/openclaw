@@ -144,12 +144,12 @@ type StartDiagnosticHeartbeatOptions = {
   emitMemorySample?: EmitDiagnosticMemorySample;
   sampleLiveness?: SampleDiagnosticLiveness;
   /**
-   * Current loop-health observation for recovery decisions, kept separate from
-   * `sampleLiveness` because that one is the operator-warning path and its Gateway
-   * implementation withholds degradation shorter than a minute. An absent observation
-   * means no health evidence, not a healthy loop.
+   * Loop-delay verdict for recovery decisions, kept separate from `sampleLiveness`
+   * because that one is the operator-warning path and its Gateway implementation
+   * withholds degradation shorter than a minute. The sampler owns this answer because
+   * only it knows whether its own next sample is overdue.
    */
-  readEventLoopHealth?: () => { reasons: readonly string[] } | undefined;
+  readEventLoopDelayed?: () => boolean;
   recoverStuckSession?: RecoverStuckSession;
   startupGraceMs?: number;
   /** Keeps fake-timer recovery tests fast without reopening runtime config tuning. */
@@ -309,22 +309,6 @@ function stopDiagnosticLivenessSampler(): void {
   lastDiagnosticLivenessEventLoopUtilization = null;
   lastDiagnosticLivenessEventAt = 0;
   lastDiagnosticLivenessWarnAt = 0;
-}
-
-let lastObservedEventLoopHealth: { reasons: readonly string[] } | undefined;
-
-/**
- * The supplied monitor commits a new observation roughly once a second and keeps returning
- * the same object until it does. An unchanged reference therefore describes a window that
- * closed before this tick, and after a stall starves that sampler the retained observation
- * still reads healthy. Report no evidence in that case rather than a responsive loop.
- */
-function resolveSuppliedEventLoopDelayed(
-  health: { reasons: readonly string[] } | undefined,
-): boolean | undefined {
-  const advanced = health !== undefined && health !== lastObservedEventLoopHealth;
-  lastObservedEventLoopHealth = health;
-  return advanced && health ? health.reasons.includes("event_loop_delay") : undefined;
 }
 
 /**
@@ -1176,7 +1160,6 @@ export function startDiagnosticHeartbeat(
   const livenessGraceUntil =
     opts?.startupGraceMs != null && opts.startupGraceMs > 0 ? Date.now() + opts.startupGraceMs : 0;
   lastDiagnosticHeartbeatTickAt = Date.now();
-  lastObservedEventLoopHealth = undefined;
   heartbeatInterval = setInterval(() => {
     // Reuse this tick for exporter demand changes; GC collection never adds a timer.
     reconcileDiagnosticGcObserver();
@@ -1207,9 +1190,7 @@ export function startDiagnosticHeartbeat(
     // timer late on every tick with a responsive loop, and deferring on lateness alone
     // left recovery disabled for the process lifetime. Absent health evidence the tick
     // still defers, because nothing then rules out a stall holding queued progress.
-    const eventLoopDelayed = opts?.readEventLoopHealth
-      ? resolveSuppliedEventLoopDelayed(opts.readEventLoopHealth())
-      : readBuiltInEventLoopDelayed();
+    const eventLoopDelayed = (opts?.readEventLoopDelayed ?? readBuiltInEventLoopDelayed)();
     const shouldDeferRecovery = heartbeatDelayed && eventLoopDelayed !== false;
     if (heartbeatDelayed && !inStartupGrace) {
       diag.warn(
@@ -1349,7 +1330,6 @@ export function stopDiagnosticHeartbeat() {
     heartbeatInterval = null;
   }
   lastDiagnosticHeartbeatTickAt = undefined;
-  lastObservedEventLoopHealth = undefined;
   stopDiagnosticRunActivityTracking();
   retireDiagnosticSessionObservations();
   stopDiagnosticLivenessSampler();

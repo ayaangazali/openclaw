@@ -592,15 +592,15 @@ describe("stuck session diagnostics threshold", () => {
     expectLoggerMessageContaining(warnSpy, "event loop stayed responsive");
   });
 
-  it("defers a late tick when no event-loop health evidence is available", () => {
-    // Without a working delay monitor nothing rules out a stall holding queued progress,
-    // so the tick keeps the original conservative behavior rather than authorizing abort.
+  it("defers a late tick when the caller supplies no loop-delay verdict", () => {
+    // Standalone callers omit readEventLoopDelayed. Nothing then rules out a stall holding
+    // queued progress, so the tick keeps the original conservative behavior rather than
+    // authorizing abort from a measurement it cannot check for freshness.
     const recoverStuckSession = vi.fn();
 
     vi.setSystemTime(0);
     startEnabledDiagnosticHeartbeat({
       recoverStuckSession,
-      readEventLoopDelayed: () => true,
       sampleLiveness: () => null,
     });
     logSessionStateChange({ sessionId: "s1", sessionKey: "main", state: "processing" });

@@ -147,7 +147,8 @@ type StartDiagnosticHeartbeatOptions = {
    * Loop-delay verdict for recovery decisions, kept separate from `sampleLiveness`
    * because that one is the operator-warning path and its Gateway implementation
    * withholds degradation shorter than a minute. The sampler owns this answer because
-   * only it knows whether its own next sample is overdue.
+   * only it knows whether its own next sample is overdue. Omitting it keeps a late tick
+   * deferring, since nothing else can prove the loop was responsive.
    */
   readEventLoopDelayed?: () => boolean;
   recoverStuckSession?: RecoverStuckSession;
@@ -309,22 +310,6 @@ function stopDiagnosticLivenessSampler(): void {
   lastDiagnosticLivenessEventLoopUtilization = null;
   lastDiagnosticLivenessEventAt = 0;
   lastDiagnosticLivenessWarnAt = 0;
-}
-
-/**
- * Reads the current delay window without consuming it. `sampleDiagnosticLiveness` owns
- * the reset, so a caller earlier in the same tick observes the same window.
- */
-function readBuiltInEventLoopDelayed(): boolean | undefined {
-  if (!diagnosticLivenessMonitor) {
-    return undefined;
-  }
-  return (
-    nanosecondsToMilliseconds(diagnosticLivenessMonitor.percentile(99)) >=
-      DEFAULT_LIVENESS_EVENT_LOOP_DELAY_WARN_MS ||
-    nanosecondsToMilliseconds(diagnosticLivenessMonitor.max) >=
-      DEFAULT_LIVENESS_EVENT_LOOP_DELAY_WARN_MS
-  );
 }
 
 function sampleDiagnosticLiveness(now: number): DiagnosticLivenessSample | null {
@@ -1190,7 +1175,9 @@ export function startDiagnosticHeartbeat(
     // timer late on every tick with a responsive loop, and deferring on lateness alone
     // left recovery disabled for the process lifetime. Absent health evidence the tick
     // still defers, because nothing then rules out a stall holding queued progress.
-    const eventLoopDelayed = (opts?.readEventLoopDelayed ?? readBuiltInEventLoopDelayed)();
+    // Only a positive "responsive" reading unblocks recovery. A caller without a monitor
+    // cannot rule out a stall holding queued progress, so it keeps deferring on lateness.
+    const eventLoopDelayed = opts?.readEventLoopDelayed?.();
     const shouldDeferRecovery = heartbeatDelayed && eventLoopDelayed !== false;
     if (heartbeatDelayed && !inStartupGrace) {
       diag.warn(

@@ -53,13 +53,17 @@ describe("failover user copy", () => {
     );
   });
 
-  it("preserves actionable provider retry detail for classified rate limits", () => {
-    expect(
-      renderRateLimitOrOverloadedCopy({
-        reason: "rate_limit",
-        raw: "429 rate limit: service overloaded, try again in 30 seconds",
-      }),
-    ).toBe("⚠️ rate limit: service overloaded, try again in 30 seconds");
+  it.each([
+    [
+      "429 rate limit: service overloaded, try again in 30 seconds",
+      "⚠️ rate limit: service overloaded, try again in 30 seconds",
+    ],
+    [
+      "All models failed (2): a/m: try again in 17 minutes (rate_limit) | b/m: 429 (rate_limit)",
+      "⚠️ All models failed (2): a/m: try again in 17 minutes (rate_limit) | b/m: 429 (rate_limit)",
+    ],
+  ])("preserves bounded provider retry detail: %s", (raw, expected) => {
+    expect(renderRateLimitOrOverloadedCopy({ reason: "rate_limit", raw })).toBe(expected);
   });
 
   it.each([
@@ -111,6 +115,39 @@ describe("failover user copy", () => {
     ).toBe(
       "⚠️ All attempted models were rate-limited or overloaded. Please try again in a few minutes.",
     );
+  });
+
+  it("preserves the first bounded provider hint from structured exhausted attempts", () => {
+    const attempts = [0, 1, 2].map((index) => ({
+      provider: `mock${index}`,
+      model: `synthetic-${"long-model-name-".repeat(10)}${index}`,
+      reason: "rate_limit" as const,
+      error: `Rate limit reached. Please try again in ${17 + index} minutes.`,
+    }));
+    expect(
+      renderRateLimitReplyCopy({
+        message: `All models failed (3): ${attempts
+          .map((attempt) => `${attempt.provider}/${attempt.model}: ${attempt.error} (rate_limit)`)
+          .join(" | ")}`,
+        reason: "rate_limit",
+        attempts,
+        sanitizeText: (text) => renderSanitizedUserFacingText(text, { errorContext: true }),
+      }),
+    ).toBe("⚠️ Rate limit reached. Please try again in 17 minutes.");
+  });
+
+  it.each([
+    `Rate limit reached. Try again in 17 minutes. ${"x".repeat(301)}`,
+    "<html>Rate limit reached. Try again in 17 minutes.</html>",
+    "Rate limit reached",
+  ])("keeps unsafe or nonspecific structured provider text generic: %s", (error) => {
+    expect(
+      renderRateLimitReplyCopy({
+        message: "All models failed (1)",
+        reason: "rate_limit",
+        attempts: [{ provider: "mock", model: "model", reason: "rate_limit", error }],
+      }),
+    ).toBe("⚠️ The model request was rate-limited. Please try again in a few minutes.");
   });
 
   it("uses neutral billing copy for subscription credentials", () => {

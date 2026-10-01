@@ -417,6 +417,15 @@ export function renderRateLimitReplyCopy(params: {
     }
     return RATE_LIMIT_RETRY_MESSAGE;
   }
+  for (const attempt of attempts) {
+    if (attempt.reason !== "rate_limit" || !attempt.error) {
+      continue;
+    }
+    const hint = extractProviderRateLimitMessage(attempt.error);
+    if (hint) {
+      return params.sanitizeText?.(attempt.error) ?? hint;
+    }
+  }
   const expiry = params.cooldownExpiry;
   const nowMs = params.nowMs ?? Date.now();
   if (typeof expiry === "number" && expiry > nowMs) {

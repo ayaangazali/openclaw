@@ -85,7 +85,7 @@ describe("executeAgentTurn: terminal failures", () => {
     });
 
     const executeAgentTurn = await getExecuteAgentTurnForTest();
-    const result = await executeAgentTurn(createFailureRunAgentTurnParams());
+    const result = await executeAgentTurn(createRunAgentTurnParams(createFollowupRun()));
 
     const rendered = JSON.stringify(result);
     expect(rendered).toContain("resets 6:20pm (Europe/London)");

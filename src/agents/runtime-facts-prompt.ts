@@ -1,16 +1,12 @@
-import path from "node:path";
 /** Compact current-turn snapshots; instructions belong in the stable system prompt. */
+import path from "node:path";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { loadExecApprovals, resolveExecApprovalsFromFile } from "../infra/exec-approvals.js";
 import { listActiveProcessSessionReferences } from "./bash-process-references.js";
 import { resolveProcessToolScopeKey } from "./bash-process-scope.js";
 import type { RuntimeContextFragment } from "./internal-runtime-context.js";
-import {
-  buildActiveImageGenerationTaskPromptContextForSession,
-  buildActiveMusicGenerationTaskPromptContextForSession,
-  buildActiveVideoGenerationTaskPromptContextForSession,
-} from "./media-generation-task-status.js";
+import { buildMediaTaskRuntimeContext } from "./media-generation-task-status.js";
 import { sanitizeForPromptLiteral } from "./sanitize-for-prompt.js";
 import { buildActiveSubagentRuntimeContext } from "./subagents/registry/subagent-active-context.js";
 
@@ -22,21 +18,6 @@ type RuntimeFactsParams = {
   cfg: OpenClawConfig;
 };
 
-/** Shared by embedded carriers and CLI current-turn context. */
-export function buildMediaTaskRuntimeContext(
-  params: Pick<RuntimeFactsParams, "capabilityToolNames" | "sessionKey" | "agentId">,
-): string | undefined {
-  const sections = [
-    ["image_generate", buildActiveImageGenerationTaskPromptContextForSession],
-    ["music_generate", buildActiveMusicGenerationTaskPromptContextForSession],
-    ["video_generate", buildActiveVideoGenerationTaskPromptContextForSession],
-  ] as const;
-  const facts = sections
-    .filter(([tool]) => params.capabilityToolNames.has(tool))
-    .map(([tool, build]) => build(params.sessionKey, params.agentId) ?? `- tool=${tool}; none`);
-  return facts.length ? ["## Media Generation Tasks", ...facts].join("\n") : undefined;
-}
-
 function buildApprovedExecutablesRuntimeContext(agentId: string): string {
   const header = "## Approved executables";
   try {
@@ -44,12 +25,7 @@ function buildApprovedExecutablesRuntimeContext(agentId: string): string {
     const hints = allowlist
       .flatMap((entry) => {
         const pattern = entry.pattern.trim();
-        if (
-          !pattern ||
-          pattern === "*" ||
-          pattern.startsWith("=command:") ||
-          !/[\\/~]/.test(pattern)
-        ) {
+        if (pattern.startsWith("=command:") || !/[\\/~]/.test(pattern)) {
           return [];
         }
         // Keep absolute approval tokens exact; a basename can resolve to another binary.
@@ -79,7 +55,9 @@ function buildApprovedExecutablesRuntimeContext(agentId: string): string {
   }
 }
 
-export function buildRuntimeFactsContext(params: RuntimeFactsParams): RuntimeContextFragment[] {
+export async function buildRuntimeFactsContext(
+  params: RuntimeFactsParams,
+): Promise<RuntimeContextFragment[]> {
   const sections: string[] = [];
   if (process.platform === "win32" && params.capabilityToolNames.has("exec")) {
     sections.push(buildApprovedExecutablesRuntimeContext(params.agentId));
@@ -103,16 +81,17 @@ export function buildRuntimeFactsContext(params: RuntimeFactsParams): RuntimeCon
       ].join("\n"),
     );
   }
-  if (params.capabilityToolNames.has("sessions_spawn")) {
-    sections.push(
-      buildActiveSubagentRuntimeContext({
-        cfg: params.cfg,
-        controllerSessionKey: params.sessionKey,
-        controllerAgentId: params.agentId,
-      }) ?? "## Active Subagents\nnone",
-    );
+  const canSpawn = params.capabilityToolNames.has("sessions_spawn");
+  const subagentContext = await buildActiveSubagentRuntimeContext({
+    cfg: params.cfg,
+    controllerSessionKey: params.sessionKey,
+    controllerAgentId: params.agentId,
+    includeSpawnContext: canSpawn,
+  });
+  if (subagentContext || canSpawn) {
+    sections.push(subagentContext ?? "## Active Subagents\nnone");
   }
-  const media = buildMediaTaskRuntimeContext(params);
+  const media = await buildMediaTaskRuntimeContext(params);
   if (media) {
     sections.push(media);
   }

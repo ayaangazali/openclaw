@@ -16,8 +16,6 @@ const ESCAPED_INTERNAL_RUNTIME_CONTEXT_END = "[[OPENCLAW_INTERNAL_CONTEXT_END]]"
 /** Notice inserted into runtime-generated context blocks. */
 export const OPENCLAW_RUNTIME_CONTEXT_NOTICE =
   "This context is runtime-generated, not user-authored. Keep internal details private.";
-/** Header for runtime events passed as prompt context. */
-export const OPENCLAW_RUNTIME_EVENT_HEADER = "OpenClaw runtime event.";
 /** Custom message type used for structured runtime-context messages. */
 export const OPENCLAW_RUNTIME_CONTEXT_CUSTOM_TYPE = "openclaw.runtime-context";
 
@@ -25,6 +23,16 @@ export const OPENCLAW_RUNTIME_CONTEXT_CUSTOM_TYPE = "openclaw.runtime-context";
 export type RuntimeContextFragment = {
   kind: "runtime-instruction" | "conversation-data" | "heartbeat-outcome";
   text: string;
+};
+
+export type CurrentInboundPromptContext = {
+  text: string;
+  /** Producer-owned fragments for model projection; text remains the legacy rendering. */
+  fragments?: RuntimeContextFragment[];
+  resumableText?: string;
+  promptJoiner?: "\n\n" | "\n" | " ";
+  /** Generated goal blocks owned by inbound-context assembly, never user text. */
+  injectedGoalContexts?: string[];
 };
 
 const LEGACY_INTERNAL_CONTEXT_HEADER =
@@ -215,50 +223,66 @@ function stripLegacyInternalRuntimeContext(text: string): string {
 const RUNTIME_CONTEXT_PROMPT_HEADERS: readonly string[] = [
   "OpenClaw runtime context for the active user request in this turn. Do not reply to or describe this context. Use it to continue answering the active user request now. Do not wait for another message.",
   "OpenClaw runtime context for the immediately preceding user message.",
-  OPENCLAW_RUNTIME_EVENT_HEADER,
+  "OpenClaw runtime event.",
 ];
+const RUNTIME_CONTEXT_CARRIER_PREFIX_PATTERN = new RegExp(
+  RUNTIME_CONTEXT_PROMPT_HEADERS.flatMap((header) => {
+    const sentences = header.split(". ");
+    return sentences.map((_, index) => sentences.slice(index).join(". "));
+  })
+    .map((prefix) => prefix.split(/\s+/).map(escapeRegExp).join("\\s+"))
+    .join("|"),
+);
+
+const RUNTIME_CONTEXT_NOTICE_PATTERN = new RegExp(
+  OPENCLAW_RUNTIME_CONTEXT_NOTICE.split(/\s+/).map(escapeRegExp).join("\\s+"),
+);
+const RUNTIME_CONTEXT_PREFACE_PATTERN = new RegExp(
+  `^[ \\t]*(?:${RUNTIME_CONTEXT_CARRIER_PREFIX_PATTERN.source})\\s+${RUNTIME_CONTEXT_NOTICE_PATTERN.source}[ \\t]*(?:\\r?\\n|$)`,
+  "gm",
+);
 
 function stripRuntimeContextPromptPreface(text: string): string {
-  const lines = text.split(/\r?\n/);
-  let changed = false;
-  const output: string[] = [];
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? "";
-    const nextLine = lines[index + 1] ?? "";
-    if (
-      RUNTIME_CONTEXT_PROMPT_HEADERS.includes(line.trim()) &&
-      nextLine.trim() === OPENCLAW_RUNTIME_CONTEXT_NOTICE
-    ) {
-      changed = true;
-      index += 1;
-      while (index + 1 < lines.length && (lines[index + 1] ?? "").trim() === "") {
-        index += 1;
-      }
-      continue;
-    }
-    output.push(line);
+  // Each alternative has a fixed word count; unrelated lines never grow a candidate scan.
+  // The notice can also occur in ordinary authored text. Avoid running the
+  // large generated regexp unless a recognized carrier prefix is present.
+  if (!RUNTIME_CONTEXT_CARRIER_PREFIX_PATTERN.test(text)) {
+    return text;
   }
-
-  return changed
-    ? output
-        .join("\n")
-        .replace(/\n{3,}/g, "\n\n")
-        .trim()
-    : text;
+  const stripped = text.replace(RUNTIME_CONTEXT_PREFACE_PATTERN, "");
+  return stripped === text ? text : stripped.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /** Remove protected and legacy runtime-context blocks from text. */
 export function stripInternalRuntimeContext(
-  text: string,
-  options: { preserveSurroundingWhitespace?: boolean; separator?: string } = {},
+  input: string,
+  options: {
+    preserveSurroundingWhitespace?: boolean;
+    separator?: string;
+    streaming?: boolean;
+  } = {},
 ): string {
-  // All removable formats contain a delimiter or the exact runtime notice.
+  let text = input;
+  if (options.streaming) {
+    // A cumulative preview must not publish a marker before its next chunk
+    // completes the delimiter. Final text still preserves literal prefixes.
+    const lineStart = text.lastIndexOf("\n") + 1;
+    const tail = text.slice(lineStart).trim();
+    if (
+      tail &&
+      [INTERNAL_RUNTIME_CONTEXT_BEGIN, INTERNAL_RUNTIME_CONTEXT_END].some(
+        (marker) => tail.length < marker.length && marker.startsWith(tail),
+      )
+    ) {
+      text = text.slice(0, lineStart).trimEnd();
+    }
+  }
+  // All removable formats contain a delimiter or the whitespace-tolerant runtime notice.
   // Skip delimiter scans and line parsing for ordinary display text.
   if (
     !text.includes(INTERNAL_RUNTIME_CONTEXT_BEGIN) &&
     !text.includes(INTERNAL_RUNTIME_CONTEXT_END) &&
-    !text.includes(OPENCLAW_RUNTIME_CONTEXT_NOTICE)
+    !RUNTIME_CONTEXT_NOTICE_PATTERN.test(text)
   ) {
     return text;
   }
@@ -286,7 +310,7 @@ export function hasInternalRuntimeContext(text: string): boolean {
 }
 
 /** Identifies hidden runtime context independently of its queue or transcript owner. */
-function isOpenClawRuntimeContextCustomMessage(message: unknown): boolean {
+export function isOpenClawRuntimeContextCustomMessage(message: unknown): boolean {
   if (!message || typeof message !== "object") {
     return false;
   }
@@ -377,18 +401,21 @@ export function stripHistoricalRuntimeContextCustomMessages<T>(messages: T[]): T
   if (lastUserIndex === -1) {
     return messages.filter((message) => !isOpenClawRuntimeContextCustomMessage(message));
   }
-  const currentRuntimeContextIndexes = new Set<number>();
-  for (let index = lastUserIndex - 1; index >= 0; index -= 1) {
-    if (!isOpenClawRuntimeContextCustomMessage(messages[index])) {
-      break;
-    }
-    currentRuntimeContextIndexes.add(index);
+  let currentRuntimeContextStart = lastUserIndex;
+  while (
+    currentRuntimeContextStart > 0 &&
+    isOpenClawRuntimeContextCustomMessage(messages[currentRuntimeContextStart - 1])
+  ) {
+    currentRuntimeContextStart -= 1;
   }
   return messages.filter((message, index) => {
     if (!isOpenClawRuntimeContextCustomMessage(message)) {
       return true;
     }
-    return currentRuntimeContextIndexes.has(index) || isRetainedRuntimeContextMessage(message);
+    return (
+      (index >= currentRuntimeContextStart && index < lastUserIndex) ||
+      isRetainedRuntimeContextMessage(message)
+    );
   });
 }
 

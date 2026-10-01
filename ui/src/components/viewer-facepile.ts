@@ -1,19 +1,24 @@
+import { ContextConsumer } from "@lit/context";
 import { html, nothing } from "lit";
 import { property } from "lit/decorators.js";
 import type {
   SessionParticipant,
   SessionParticipantIdentity,
 } from "../../../packages/gateway-protocol/src/schema/session-participant.js";
+import { applicationContext } from "../app/context.ts";
 import type { AuthenticatedUser } from "../app/user-profile.ts";
 import { t } from "../i18n/index.ts";
+import { resolveAvatar } from "../lib/identity-avatar.ts";
 import {
   presenceViewerLabel,
   projectPresenceViewers,
   type PresenceViewer,
 } from "../lib/presence-users.ts";
 import { OpenClawLightDomContentsElement } from "../lit/openclaw-element.ts";
+import { SubscriptionsController } from "../lit/subscriptions-controller.ts";
 import {
   identityAvatarClass,
+  renderAgentIdentityAvatar,
   renderIdentityAvatarImage,
   resolveIdentityAvatarView,
   type IdentityAvatarView,
@@ -29,7 +34,7 @@ function renderViewerAvatar(view: IdentityAvatarView) {
   const fallback = html`<span
     class=${view.imageUrl ? "viewer-avatar__fallback" : nothing}
     style=${`background: hsl(${view.fallback.colorSeed % 360} 48% 42%)`}
-    >${view.fallback.initials}</span
+    ><span class="viewer-avatar__initials">${view.fallback.initials}</span></span
   >`;
   if (!view.imageUrl) {
     return fallback;
@@ -40,24 +45,60 @@ function renderViewerAvatar(view: IdentityAvatarView) {
 type ViewerAvatarVariant = "session" | "footer" | "profile";
 
 class ViewerAvatar extends OpenClawLightDomContentsElement {
+  private readonly context = new ContextConsumer(this, {
+    context: applicationContext,
+    subscribe: true,
+  });
   @property({ attribute: false }) user: PresenceViewer | null = null;
   @property() variant: ViewerAvatarVariant = "session";
   @property({ attribute: false }) identity?: SessionParticipantIdentity;
   // Presence selectors use this marker; owner and menu chrome must opt out.
   @property({ type: Boolean, attribute: false }) markAsViewer = true;
 
+  constructor() {
+    super();
+    void new SubscriptionsController(this).watch(
+      () =>
+        !this.user?.avatarUrl?.trim() && (this.identity ?? this.user?.identity)?.type === "profile"
+          ? this.context.value?.gateway
+          : undefined,
+      (gateway, notify) => {
+        let previous = this.selfAvatarUrl;
+        return gateway.subscribe(() => {
+          const next = this.selfAvatarUrl;
+          if (next !== previous) {
+            previous = next;
+            notify();
+          }
+        });
+      },
+    );
+  }
+
+  private get selfAvatarUrl(): string | undefined {
+    const identity = this.identity ?? this.user?.identity;
+    const self = this.context.value?.gateway.snapshot.selfUser;
+    return identity?.type === "profile" &&
+      self?.identity?.type === "profile" &&
+      identity.id === self.identity.id
+      ? self.avatarUrl
+      : undefined;
+  }
+
   override render() {
     const user = this.user;
     if (!user) {
       return nothing;
     }
-    const label = presenceViewerLabel(user);
+    const label =
+      this.variant === "profile" ? (user.name ?? user.email ?? user.id) : presenceViewerLabel(user);
     const view = resolveIdentityAvatarView({
       identity: this.identity ?? user.identity,
       id: user.id,
       name: user.name,
       username: user.email,
-      profileAvatarUrl: user.avatarUrl,
+      // Durable owner rows can omit a URL; reuse this profile's known revision.
+      profileAvatarUrl: user.avatarUrl?.trim() || this.selfAvatarUrl,
     });
     return html`<span
       class=${identityAvatarClass(`viewer-avatar viewer-avatar--${this.variant}`, view)}
@@ -67,6 +108,25 @@ class ViewerAvatar extends OpenClawLightDomContentsElement {
       ${renderViewerAvatar(view)}
     </span>`;
   }
+}
+
+function renderFacepileAgentAvatar(
+  user: Pick<PresenceViewer, "id" | "name" | "email" | "avatarUrl">,
+  identity: Extract<SessionParticipantIdentity, { type: "agent" }>,
+  markAsViewer: boolean,
+) {
+  const avatar = resolveAvatar({
+    identity,
+    id: user.id,
+    name: user.name,
+    profileAvatarUrl: user.avatarUrl,
+  });
+  return html`<span
+    class="viewer-avatar viewer-avatar--session"
+    aria-label=${presenceViewerLabel(user)}
+    data-viewer-id=${markAsViewer ? user.id : nothing}
+    >${renderAgentIdentityAvatar({ id: identity.id, avatar: avatar.kind === "profile" ? avatar.url : null })}</span
+  >`;
 }
 
 class ViewerFacepile extends OpenClawLightDomContentsElement {
@@ -124,14 +184,20 @@ class ViewerFacepile extends OpenClawLightDomContentsElement {
         (user) => html`<openclaw-tooltip .content=${presenceViewerLabel(user)}>
           <span class="viewer-facepile__tooltip-anchor">
             ${renderStandalonePersonLink(
-              html`<openclaw-viewer-avatar
-                .user=${user}
-                .identity=${user.identity}
-                .markAsViewer=${!this.staticParticipants}
-                variant="session"
-              ></openclaw-viewer-avatar>`,
+              user.identity?.type === "agent"
+                ? renderFacepileAgentAvatar(user, user.identity, !this.staticParticipants)
+                : html`<openclaw-viewer-avatar
+                    .user=${user}
+                    .identity=${user.identity}
+                    .markAsViewer=${!this.staticParticipants}
+                    variant="session"
+                  ></openclaw-viewer-avatar>`,
               user.identity?.type === "profile"
-                ? personActivityLink(user.identity.id, this.personActivity, user.name)
+                ? personActivityLink(
+                    user.identity.id,
+                    this.personActivity,
+                    presenceViewerLabel(user),
+                  )
                 : null,
             )}
           </span>

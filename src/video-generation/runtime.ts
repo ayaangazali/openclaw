@@ -3,9 +3,11 @@ import { resolveAgentModelTimeoutMsValue } from "../config/model-input.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { parseVideoGenerationModelRef } from "../media-generation/model-ref.js";
+import { createMediaProviderLookup } from "../media-generation/provider-registry.js";
 import {
   getVideoGenerationProvider,
   listVideoGenerationProviders,
+  withVideoGenerationProviders,
 } from "../media-generation/registry.js";
 import {
   buildMediaGenerationNormalizationMetadata,
@@ -14,7 +16,7 @@ import {
   resolveMediaProviderRequestTimeoutMs,
   runMediaGenerationCandidates,
 } from "../media-generation/runtime-shared.js";
-import { getProviderEnvVars } from "../secrets/provider-env-vars.js";
+import { getProviderEnvVarsCore } from "../secrets/provider-env-vars.js";
 import { resolveVideoGenerationModeCapabilities } from "./capabilities.js";
 import {
   buildVideoGenerationCapabilityFailure,
@@ -33,7 +35,7 @@ const SUPPORTED_DURATIONS_HINT = Symbol.for("openclaw.videoGeneration.supportedD
 type VideoGenerationRuntimeDeps = {
   getProvider?: typeof getVideoGenerationProvider;
   listProviders?: typeof listVideoGenerationProviders;
-  getProviderEnvVars?: typeof getProviderEnvVars;
+  getProviderEnvVars?: typeof getProviderEnvVarsCore;
   log?: Pick<typeof log, "debug" | "warn">;
 };
 
@@ -117,6 +119,23 @@ export async function generateVideo(
   params: GenerateVideoParams,
   deps: VideoGenerationRuntimeDeps = {},
 ): Promise<GenerateVideoRuntimeResult> {
+  if (deps.getProvider && deps.listProviders) {
+    return runVideoGeneration(params, deps);
+  }
+  return withVideoGenerationProviders(params.cfg, (providers) => {
+    const lookup = createMediaProviderLookup(providers);
+    return runVideoGeneration(params, {
+      ...deps,
+      getProvider: deps.getProvider ?? lookup.getProvider,
+      listProviders: deps.listProviders ?? lookup.listProviders,
+    });
+  });
+}
+
+async function runVideoGeneration(
+  params: GenerateVideoParams,
+  deps: VideoGenerationRuntimeDeps,
+): Promise<GenerateVideoRuntimeResult> {
   const getProvider = deps.getProvider ?? getVideoGenerationProvider;
   const listProviders = deps.listProviders ?? listVideoGenerationProviders;
   const logger = deps.log ?? log;
@@ -153,7 +172,9 @@ export async function generateVideo(
     capability: "video",
     getProvider: (providerId) => getProvider(providerId, params.cfg),
     onFailure: (attempt) => {
-      logger.debug(`video-generation candidate failed: ${attempt.provider}/${attempt.model}`);
+      logger.warn(
+        `video-generation candidate failed: ${attempt.provider}/${attempt.model}: ${attempt.error}`,
+      );
     },
     async prepareCandidate(candidate, provider) {
       const timeoutMs = resolveMediaProviderRequestTimeoutMs({

@@ -5,12 +5,13 @@ import { replaceTranscriptEvents } from "../config/sessions/session-accessor.js"
 import { closeOpenClawAgentDatabasesForTest } from "../state/openclaw-agent-db.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
 import { captureEnv, setTestEnvValue } from "../test-utils/env.js";
-import { readSessionMessagesAroundIdWithStatsAsync } from "./session-transcript-anchor-reader.js";
+import { createResetBoundaryTranscriptSource } from "./session-end-transcript-reader.js";
 import {
   readRecentSessionMessagesWithStatsAsync,
   readSessionMessageByIdAsync,
   readSessionMessageCountAsync,
   readSessionMessagesAsync,
+  readSessionMessagesAroundIdWithStatsAsync,
   readSessionMessagesMatchingIdAsync,
   readSessionMessagesPageWithStatsAsync,
   visitSessionMessagesAsync,
@@ -32,6 +33,7 @@ function compaction(id: string, firstKeptEntryId: string) {
     summary: `${id} summary`,
     firstKeptEntryId,
     tokensBefore: 100,
+    tokensAfter: 25,
   };
 }
 
@@ -39,8 +41,39 @@ function reset(id: string, firstKeptEntryId?: string) {
   return { type: "reset" as const, id, timestamp, reason: "reset", firstKeptEntryId };
 }
 
+function customMessage(id: string, display: unknown, customType = "run-failed-before-reply") {
+  return {
+    type: "custom_message" as const,
+    id,
+    timestamp,
+    customType,
+    content: `${id}: This turn ended before a reply.`,
+    display,
+    details: { error: "private diagnostic" },
+  };
+}
+
 function messageIds(messages: unknown[]) {
   return messages.map((entry) => (entry as { __openclaw: { id: string } })["__openclaw"].id);
+}
+
+function historicalWindowIds(
+  events: Array<{ id: string; type?: string }>,
+  targetId: string,
+  hiddenIds: string[],
+) {
+  const targetIndex = events.findIndex((event) => event.id === targetId);
+  const closingIndex =
+    events[targetIndex]?.type === "reset"
+      ? targetIndex
+      : events.findIndex((event, index) => index > targetIndex && event.type === "reset");
+  const openingIndex = events.findLastIndex(
+    (event, index) => index < closingIndex && event.type === "reset",
+  );
+  return events
+    .slice(openingIndex + 1, closingIndex + 1)
+    .filter((event) => !hiddenIds.includes(event.id))
+    .map((event) => event.id);
 }
 
 describe("session transcript reader marker projection", () => {
@@ -78,7 +111,89 @@ describe("session transcript reader marker projection", () => {
     return scope;
   }
 
+  test("pages pre-compaction history and token savings from the transcript without checkpoints", async () => {
+    const scope = await writeTranscript("metrics", [
+      message("before", "Original conversation"),
+      compaction("summary", "before"),
+      message("after", "Continued conversation", "assistant"),
+    ]);
+    const messages = await readSessionMessagesAsync(scope, {
+      mode: "full",
+      reason: "Compaction metrics and retained history regression",
+    });
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ __openclaw: expect.objectContaining({ id: "before" }) }),
+        expect.objectContaining({
+          __openclaw: expect.objectContaining({
+            id: "summary",
+            tokensBefore: 100,
+            tokensAfter: 25,
+          }),
+        }),
+        expect.objectContaining({ __openclaw: expect.objectContaining({ id: "after" }) }),
+      ]),
+    );
+  });
+
+  test("reads a bounded ended window without successor turns after same-ID reset", async () => {
+    const boundaryId = "ended-boundary";
+    const scope = await writeTranscript("ended-window", [
+      message("prior-user", "remember this"),
+      message("prior-assistant", "retained answer", "assistant"),
+      reset(boundaryId),
+      message("successor-user", "new session content"),
+    ]);
+    const source = createResetBoundaryTranscriptSource(scope, boundaryId);
+    if (!source.available) {
+      throw new Error("expected available ended transcript source");
+    }
+
+    const result = await source.readTail({ maxMessages: 10, maxBytes: 2_048 });
+
+    expect(messageIds([...result.messages])).toEqual(["prior-user", "prior-assistant"]);
+    expect(result.totalMessages).toBe(2);
+    expect(result.truncated).toBe(false);
+  });
+
   test.each([
+    {
+      name: "displayed-custom-messages",
+      events: [
+        message("user", "question"),
+        customMessage("notice", true),
+        customMessage("hidden", false),
+        customMessage("missing-display", undefined),
+        customMessage("numeric-display", 1),
+        customMessage("string-display", "true"),
+        customMessage("runtime-context", true, "openclaw.runtime-context"),
+        compaction("summary", "user"),
+        customMessage("after-summary", true),
+      ],
+      expectedIds: ["user", "notice", "summary", "after-summary"],
+      hiddenIds: [
+        "hidden",
+        "missing-display",
+        "numeric-display",
+        "string-display",
+        "runtime-context",
+      ],
+    },
+    {
+      name: "custom-messages-across-resets",
+      events: [
+        message("old-user", "old question"),
+        customMessage("old-notice", true),
+        customMessage("old-hidden", false),
+        reset("old-reset"),
+        message("middle-user", "middle question"),
+        customMessage("middle-notice", true),
+        reset("reset", "middle-user"),
+        customMessage("fresh-notice", true),
+      ],
+      expectedIds: ["middle-user", "reset", "fresh-notice"],
+      hiddenIds: ["old-hidden"],
+    },
     {
       name: "compaction",
       events: [
@@ -152,6 +267,7 @@ describe("session transcript reader marker projection", () => {
       expectedIds: ["reset", "fresh", "fresh-summary", "newest-summary", "after"],
     },
   ])("projects $name boundaries through every SQLite history read", async (fixture) => {
+    const hiddenIds = fixture.hiddenIds ?? [];
     const scope = await writeTranscript(`reader-${fixture.name}`, fixture.events);
     const full = await readSessionMessagesAsync(scope, {
       mode: "full",
@@ -203,14 +319,22 @@ describe("session transcript reader marker projection", () => {
       expect(byId.message).toMatchObject(
         entry.type === "message"
           ? entry.message
-          : {
-              role: "system",
-              content: [
-                { type: "text", text: entry.type === "compaction" ? "Compaction" : "Reset" },
-              ],
-              timestamp: Date.parse(timestamp),
-              __openclaw: { kind: entry.type },
-            },
+          : entry.type === "custom_message"
+            ? {
+                role: "custom",
+                customType: entry.customType,
+                content: entry.content,
+                display: true,
+                timestamp: Date.parse(timestamp),
+              }
+            : {
+                role: "system",
+                content: [
+                  { type: "text", text: entry.type === "compaction" ? "Compaction" : "Reset" },
+                ],
+                timestamp: Date.parse(timestamp),
+                __openclaw: { kind: entry.type },
+              },
       );
       expect(anchored.found).toBe(true);
       expect(messageIds(anchored.messages)).toEqual(fixture.expectedIds);
@@ -220,10 +344,29 @@ describe("session transcript reader marker projection", () => {
       (event) => !fixture.expectedIds.includes(event.id),
     )) {
       expect(await readSessionMessagesMatchingIdAsync(scope, id)).toEqual([]);
-      expect(await readSessionMessageByIdAsync(scope, id)).toMatchObject({ found: false });
-      expect(
-        await readSessionMessagesAroundIdWithStatsAsync(scope, { messageId: id, maxMessages: 10 }),
-      ).toMatchObject({ found: false, messages: [], totalMessages: fixture.expectedIds.length });
+      if (hiddenIds.includes(id)) {
+        expect(await readSessionMessageByIdAsync(scope, id)).toMatchObject({ found: false });
+        expect(
+          await readSessionMessagesAroundIdWithStatsAsync(scope, {
+            messageId: id,
+            maxMessages: 10,
+          }),
+        ).toMatchObject({ found: false, messages: [] });
+        continue;
+      }
+      const historicalIds = historicalWindowIds(fixture.events, id, hiddenIds);
+      expect(await readSessionMessageByIdAsync(scope, id)).toMatchObject({
+        found: true,
+        message: { __openclaw: { id } },
+      });
+      const anchored = await readSessionMessagesAroundIdWithStatsAsync(scope, {
+        messageId: id,
+        maxMessages: 10,
+      });
+      expect(anchored.found).toBe(true);
+      expect(messageIds(anchored.messages)).toEqual(historicalIds);
+      expect(anchored.totalMessages).toBe(historicalIds.length);
+      expect(messageIds(anchored.messages)).not.toEqual(fixture.expectedIds);
     }
   });
 });

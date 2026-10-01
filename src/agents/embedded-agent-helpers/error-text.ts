@@ -8,28 +8,33 @@ import {
   extractLeadingHttpStatus,
   formatProviderRefusalText,
   formatRawAssistantErrorForUi,
+  formatTransportErrorCopy,
   isGenericProviderInternalError,
+  isKnownTransportErrorCode,
   parseApiErrorInfo,
 } from "../../shared/assistant-error-format.js";
-import { renderAssistantRequestFailureCopy } from "../failover/assistant-request-failure-copy.js";
+import {
+  PROVIDER_SCHEMA_REJECTION_USER_TEXT,
+  renderAssistantFormatFailureCopy,
+  renderAssistantRequestFailureCopy,
+  renderFormatErrorCopy,
+} from "../failover/assistant-request-failure-copy.js";
+import { failoverReasonFromClassification } from "../failover/classification-rules.js";
 import {
   classifyFailoverSignal,
   isProviderCompletedErrorFinishReasonMessage,
-  isReasoningConstraintErrorMessage,
   isTimeoutErrorMessage,
 } from "../failover/classify.js";
+import { isReasoningConstraintErrorMessage } from "../failover/context-overflow-tables.js";
 import type { PreparedProviderFailoverOwner } from "../failover/provider-patterns.js";
 import {
   AUTH_INVALID_TOKEN_USER_TEXT,
   formatBillingErrorMessage,
   formatDiskSpaceErrorCopy,
-  formatTransportErrorCopy,
   isInvalidStreamingEventOrderError,
   isLikelyHttpErrorText,
   isRawApiErrorPayload,
   isStreamingJsonParseError,
-  PROVIDER_SCHEMA_REJECTION_USER_TEXT,
-  renderFormatErrorCopy,
   renderRateLimitOrOverloadedCopy,
 } from "../failover/user-copy.js";
 import { formatSandboxToolPolicyBlockedMessage } from "../sandbox/runtime-status.js";
@@ -91,15 +96,11 @@ function classifyAssistantErrorFacts(msg: AssistantMessage, opts?: AssistantErro
   return {
     provider: opts?.provider ?? msg.provider ?? opts?.providerOwner?.id,
     model: opts?.model ?? msg.model,
-    reason:
-      classification?.kind === "reason"
-        ? classification.reason
-        : classification
-          ? ("context_overflow" as const)
-          : null,
+    reason: failoverReasonFromClassification(classification),
     status: signal.status ?? extractErrorHttpStatus(signal.message ?? "")?.code,
     providerRuntimeFailureKind: classifyProviderRuntimeFailureKind(signal, { providerPlugin }),
     storageFailure: classifyGatewayStorageFailure(msg),
+    code: signal.code,
   };
 }
 function isMissingToolCallInputError(raw: string): boolean {
@@ -232,7 +233,9 @@ export function formatAssistantErrorText(
     return formatRawAssistantErrorForUi(raw);
   }
 
-  const transportCopy = formatTransportErrorCopy(raw);
+  const transportCopy = formatTransportErrorCopy(
+    msg.errorCode && isKnownTransportErrorCode(msg.errorCode) ? `${raw} ${msg.errorCode}` : raw,
+  );
   if (transportCopy) {
     return transportCopy;
   }
@@ -304,21 +307,16 @@ export function formatUserFacingAssistantErrorText(
   const facts = classifyAssistantErrorFacts(msg, opts);
   const friendlyError = formatAssistantErrorText(msg, opts, facts);
   const rawPassthrough = isRawAssistantErrorPassthrough({ friendlyError, rawError });
-  const structuredSchemaDetail = [
-    parseApiErrorInfo(rawError ?? ""),
-    parseApiErrorInfo(typeof msg.errorBody === "string" ? msg.errorBody.trim() : ""),
-  ].find((error) => error?.type?.toLowerCase().includes("invalid_request"))?.message;
   const schemaFriendlyError =
     friendlyError === PROVIDER_SCHEMA_REJECTION_USER_TEXT ||
     friendlyError?.startsWith("LLM request rejected:");
   const safeFriendlyError =
-    structuredSchemaDetail && schemaFriendlyError
-      ? renderFormatErrorCopy(structuredSchemaDetail)
-      : rawPassthrough
-        ? schemaFriendlyError
-          ? PROVIDER_SCHEMA_REJECTION_USER_TEXT
-          : undefined
-        : friendlyError;
+    (schemaFriendlyError ? renderAssistantFormatFailureCopy(msg) : undefined) ??
+    (rawPassthrough
+      ? schemaFriendlyError
+        ? PROVIDER_SCHEMA_REJECTION_USER_TEXT
+        : undefined
+      : friendlyError);
   if (safeFriendlyError) {
     return safeFriendlyError.trim();
   }

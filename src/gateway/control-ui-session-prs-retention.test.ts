@@ -1,18 +1,31 @@
 import { getEventListeners } from "node:events";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { runGitWorkerOperation } from "../infra/git-worker.js";
+import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-clock.js";
 import { createControlUiSessionPullRequestSubscriptions } from "./control-ui-session-pr-subscriptions.js";
-import { loadControlUiSessionPullRequests } from "./control-ui-session-prs.js";
 import {
-  evictPullRequestCache,
+  createSessionPullRequestsFixture,
   githubJson,
   pullListItem,
   routedFetch,
 } from "./control-ui-session-prs.test-support.js";
 
+const fixture = createSessionPullRequestsFixture();
+const loadControlUiSessionPullRequests = fixture.load;
+
+vi.mock("../infra/git-worker.js", () => ({ runGitWorkerOperation: vi.fn() }));
+
 let cacheEpochMs = Date.now();
 
+function localGitReads() {
+  return vi
+    .mocked(runGitWorkerOperation)
+    .mock.calls.filter(([operation]) => operation.type !== "checkout.revision");
+}
+
 beforeEach(() => {
+  vi.mocked(runGitWorkerOperation).mockReset();
   vi.useFakeTimers();
   vi.stubEnv("GH_TOKEN", "");
   vi.stubEnv("GITHUB_TOKEN", "");
@@ -20,8 +33,7 @@ beforeEach(() => {
   vi.setSystemTime(cacheEpochMs);
 });
 
-afterEach(async () => {
-  await evictPullRequestCache();
+afterEach(() => {
   vi.unstubAllEnvs();
   vi.useRealTimers();
 });
@@ -38,8 +50,13 @@ describe("watched session PR retention", () => {
             : githubJson([pullListItem({ merged_at: "2026-07-09T10:00:00Z" })]),
       },
     ]);
-    const snapshots = new Map<string, { rateLimited: boolean; pullRequests: unknown[] }>();
+    const snapshots = new Map<
+      string,
+      { rateLimited: boolean; pullRequests: unknown[]; repository: unknown }
+    >();
     const subscriptions = createControlUiSessionPullRequestSubscriptions({
+      scheduler: createTestGatewayScheduler("fake-timers"),
+      prepareRead: fixture.prepareRead,
       broadcastToConnIds: (_event, payload) => {
         if (!isRecord(payload) || !isRecord(payload.sessions)) {
           throw new Error("invalid subscription event");
@@ -55,6 +72,7 @@ describe("watched session PR retention", () => {
           snapshots.set(key, {
             rateLimited: snapshot.rateLimited,
             pullRequests: snapshot.pullRequests,
+            repository: snapshot.repository,
           });
         }
       },
@@ -83,6 +101,9 @@ describe("watched session PR retention", () => {
           (snapshot) => snapshot.rateLimited && snapshot.pullRequests.length === 1,
         ),
       ).toBe(true);
+      for (const snapshot of snapshots.values()) {
+        expect(snapshot.repository).toEqual({ owner: "openclaw", repo: "openclaw" });
+      }
       vi.setSystemTime(Date.now() + 61_000);
       await subscriptions.replace("watcher", keys, new Set(keys));
       expect(fetchImpl.mock.calls).toHaveLength(callsAtBackoff);
@@ -113,25 +134,27 @@ describe("watched session PR retention", () => {
       },
     ]);
     const signals = new Set<AbortSignal>();
-    const gitOutput = vi.fn(async (root: string, args: string[]) => {
-      if (args.includes("--abbrev-ref")) {
-        return root.slice("/watched/".length);
+    vi.mocked(runGitWorkerOperation).mockImplementation(async (operation) => {
+      if (operation.type === "checkout.revision") {
+        return "unchanged";
       }
-      if (args[0] === "remote") {
-        return "https://github.com/openclaw/openclaw.git";
+      if (operation.type === "checkout.context") {
+        return {
+          owner: "openclaw",
+          repo: "openclaw",
+          branch: operation.input.root.slice("/watched/".length),
+          root: operation.input.root,
+          defaultBranch: "main",
+        };
       }
-      if (args[0] === "symbolic-ref") {
-        return "origin/main";
+      if (operation.type === "pull-request.branch-facts") {
+        return undefined;
       }
-      return null;
+      throw new Error("Unexpected local Git operation");
     });
-    const resolveBranchLanding = vi.fn(async () => ({
-      pushedSha: null,
-      statsBase: null,
-      hasLandedPullRequest: true,
-      provenNewPushedWork: false,
-    }));
     const subscriptions = createControlUiSessionPullRequestSubscriptions({
+      scheduler: createTestGatewayScheduler("fake-timers"),
+      prepareRead: fixture.prepareRead,
       broadcastToConnIds: vi.fn(),
       load: (params, cacheSignal) => {
         if (cacheSignal) {
@@ -140,8 +163,6 @@ describe("watched session PR retention", () => {
         return loadControlUiSessionPullRequests(params, {
           cacheSignal,
           fetchImpl,
-          gitOutput,
-          resolveBranchLanding,
           resolveGitRoot: async () => `/watched/${params.sessionKey}`,
         });
       },
@@ -156,21 +177,21 @@ describe("watched session PR retention", () => {
         Array.from({ length: 100 }, (_, index) => `watched-${index + 200}`),
       );
       expect(fetchImpl.mock.calls).toHaveLength(300);
-      expect(gitOutput).toHaveBeenCalledTimes(900);
-      expect(resolveBranchLanding).toHaveBeenCalledTimes(300);
+      expect(localGitReads()).toHaveLength(600);
 
       vi.setSystemTime(Date.now() + 60_000);
       await subscriptions.pollNow();
 
       expect(fetchImpl.mock.calls).toHaveLength(300);
-      expect(gitOutput).toHaveBeenCalledTimes(900);
-      expect(resolveBranchLanding).toHaveBeenCalledTimes(300);
+      expect(localGitReads()).toHaveLength(600);
 
       vi.setSystemTime(Date.now() + 15_001);
       await subscriptions.pollNow();
       expect(fetchImpl.mock.calls).toHaveLength(300);
-      expect(gitOutput).toHaveBeenCalledTimes(1_800);
-      expect(resolveBranchLanding).toHaveBeenCalledTimes(600);
+      expect(localGitReads()).toHaveLength(600);
+      vi.setSystemTime(Date.now() + 225_000);
+      await subscriptions.pollNow();
+      expect(localGitReads()).toHaveLength(900);
       expect(signals.size).toBe(300);
       expect([...signals].every((signal) => getEventListeners(signal, "abort").length === 3)).toBe(
         true,
@@ -198,6 +219,26 @@ describe("watched session PR retention", () => {
       },
       { match: "/repos/openclaw/openclaw", response: () => githubJson({ fork: false }) },
     ]);
+    vi.mocked(runGitWorkerOperation).mockImplementation(async (operation) => {
+      if (operation.type === "checkout.revision") {
+        return branch;
+      }
+      if (operation.type === "checkout.context") {
+        return branch
+          ? {
+              owner: "openclaw",
+              repo: "openclaw",
+              branch,
+              root: operation.input.root,
+              defaultBranch: "main",
+            }
+          : null;
+      }
+      if (operation.type === "pull-request.branch-facts") {
+        return undefined;
+      }
+      throw new Error("Unexpected local Git operation");
+    });
     const load = () =>
       loadControlUiSessionPullRequests(
         { sessionKey: "retained", refresh: true },
@@ -210,18 +251,6 @@ describe("watched session PR retention", () => {
             }
             return root;
           },
-          gitOutput: async (_root, args) =>
-            args[0] === "rev-parse"
-              ? branch
-              : args[0] === "remote"
-                ? "https://github.com/openclaw/openclaw.git"
-                : "origin/main",
-          resolveBranchLanding: async () => ({
-            pushedSha: null,
-            statsBase: null,
-            hasLandedPullRequest: false,
-            provenNewPushedWork: false,
-          }),
         },
       );
     const pins = () => getEventListeners(cacheLifetime.signal, "abort").length;
@@ -238,8 +267,13 @@ describe("watched session PR retention", () => {
       root = "/retained/third";
       branch = "feature-c";
       fetchFailure = true;
-      await expect(load()).rejects.toMatchObject({ statusCode: 502 });
-      // Preserve context and the GitHub failure's expiry, but drop obsolete branch facts.
+      await expect(load()).resolves.toEqual({
+        pullRequests: [],
+        repository: { owner: "openclaw", repo: "openclaw" },
+        rateLimited: false,
+        status: "unavailable",
+      });
+      // Preserve context and the failure expiry; drop obsolete branch facts.
       expect(pins()).toBe(2);
       fetchFailure = false;
       vi.setSystemTime(Date.now() + 30_001);
@@ -254,5 +288,6 @@ describe("watched session PR retention", () => {
     } finally {
       cacheLifetime.abort();
     }
+    expect(pins()).toBe(0);
   });
 });

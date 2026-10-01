@@ -44,6 +44,7 @@ export type SubscribeEmbeddedAgentSessionParams = {
   /** Originating message channel used for subsystem log attribution. */
   messageChannel?: string;
   initialReplayState?: EmbeddedRunReplayState;
+  assistantErrorTranscript?: EmbeddedRunAttemptParams["assistantErrorTranscript"];
   hookRunner?: HookRunner;
   verboseLevel?: VerboseLevel;
   reasoningMode?: ReasoningLevel;
@@ -60,6 +61,8 @@ export type SubscribeEmbeddedAgentSessionParams = {
   onToolResult?: (payload: ReplyPayload) => void | Promise<void>;
   onAgentToolResult?: (event: { toolName: string; result: unknown; isError: boolean }) => void;
   observeToolTerminal?: EmbeddedRunAttemptParams["observeToolTerminal"];
+  /** Attempt-scoped trajectory recorder for runtime tool audit events. */
+  trajectoryRecorder?: EmbeddedRunAttemptParams["trajectoryRecorder"];
   onReasoningStream?: (payload: ReasoningStreamPayload) => void | Promise<void>;
   /** Expands window reasoning beyond "stream" mode for callers with their own display gate. */
   streamReasoningInNonStreamModes?: boolean;
@@ -89,6 +92,8 @@ export type SubscribeEmbeddedAgentSessionParams = {
   isTerminalAborted?: () => boolean | undefined;
   /** Override the terminal stop reason from the current abort owner. */
   resolveTerminalStopReason?: () => string | undefined;
+  /** Same-prompt checks can retain ordinary streaming instead of buffering a draft. */
+  deferTerminalDelivery?: boolean;
   /** Gate final block delivery/lifecycle after the natural answer is known. */
   onBeforeTerminalDelivery?: (event: {
     messages: AgentMessage[];
@@ -100,7 +105,11 @@ export type SubscribeEmbeddedAgentSessionParams = {
     isError: boolean;
     incompleteTerminalAssistant: boolean;
     hadDeterministicSideEffect: boolean;
-  }) => void | Promise<void | { suppressTerminalDelivery?: boolean }>;
+    hasPendingContinuation: boolean;
+  }) => void | Promise<void | {
+    suppressTerminalDelivery?: boolean;
+    continueCurrentTurn?: boolean;
+  }>;
   /** Best-effort hook invoked immediately before the terminal lifecycle event is emitted. */
   onBeforeLifecycleTerminal?: () => void | Promise<void>;
   enforceFinalTag?: boolean;

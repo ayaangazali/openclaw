@@ -1,4 +1,3 @@
-// Builds the channel setup list from bundled channels, installed plugins, and trusted catalog entries.
 import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import { listChatChannels } from "../../channels/chat-meta.js";
 import type { ChannelPluginCatalogEntry } from "../../channels/plugins/catalog.js";
@@ -144,28 +143,9 @@ export function resolveChannelSetupEntries(params: {
       }),
     );
   }
-  for (const entry of installedCatalogEntries) {
+  for (const entry of [...installedCatalogEntries, ...installableCatalogEntries]) {
     if (!metaById.has(entry.id)) {
-      metaById.set(
-        entry.id,
-        normalizeChannelMeta({
-          id: entry.id as ChannelChoice,
-          meta: entry.meta,
-          existing: metaById.get(entry.id),
-        }),
-      );
-    }
-  }
-  for (const entry of installableCatalogEntries) {
-    if (!metaById.has(entry.id)) {
-      metaById.set(
-        entry.id,
-        normalizeChannelMeta({
-          id: entry.id as ChannelChoice,
-          meta: entry.meta,
-          existing: metaById.get(entry.id),
-        }),
-      );
+      metaById.set(entry.id, entry.meta);
     }
   }
 

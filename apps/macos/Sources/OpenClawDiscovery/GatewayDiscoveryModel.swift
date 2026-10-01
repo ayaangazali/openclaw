@@ -72,6 +72,7 @@ public final class GatewayDiscoveryModel {
     public var statusText: String = GatewayDiscoveryStatusText.idle
 
     private let browserSession = GatewayDiscoveryBrowserSession()
+    private var generation: UInt64 = 0
     private var resultsByDomain: [String: Set<NWBrowser.Result>] = [:]
     private var gatewaysByDomain: [String: [DiscoveredGateway]] = [:]
     private var localIdentity: LocalIdentity
@@ -80,9 +81,9 @@ public final class GatewayDiscoveryModel {
     private var resolvedServiceByID: [String: ResolvedGatewayService] = [:]
     private var pendingServiceResolvers: [String: GatewayServiceResolver] = [:]
     private var wideAreaFallbackTask: Task<Void, Never>?
-    private var wideAreaFallbackGateways: [DiscoveredGateway] = []
+    private var wideAreaFallback: (domain: String, beacons: [WideAreaGatewayBeacon])?
     private var tailscaleServeFallbackTask: Task<Void, Never>?
-    private var tailscaleServeFallbackGateways: [DiscoveredGateway] = []
+    private var tailscaleServeFallbackBeacons: [TailscaleServeGatewayBeacon] = []
     private let logger = Logger(subsystem: "ai.openclaw", category: "gateway-discovery")
 
     public init(
@@ -121,24 +122,28 @@ public final class GatewayDiscoveryModel {
 
     public func refreshWideAreaFallbackNow(timeoutSeconds: TimeInterval = 5.0) {
         guard let domain = OpenClawBonjour.wideAreaGatewayServiceDomain else { return }
-        Task.detached(priority: .utility) { [weak self] in
-            guard let self else { return }
+        self.wideAreaFallbackTask?.cancel()
+        let generation = self.generation
+        self.wideAreaFallbackTask = Task.detached(priority: .utility) { [weak self] in
+            guard !Task.isCancelled else { return }
             let beacons = await WideAreaGatewayDiscovery.discover(timeoutSeconds: timeoutSeconds)
             await MainActor.run { [weak self] in
-                guard let self else { return }
-                self.wideAreaFallbackGateways = self.mapWideAreaBeacons(beacons, domain: domain)
+                guard let self, self.generation == generation, !Task.isCancelled else { return }
+                self.wideAreaFallback = (domain, beacons)
                 self.recomputeGateways()
             }
         }
     }
 
     public func refreshTailscaleServeFallbackNow(timeoutSeconds: TimeInterval = 5.0) {
-        Task.detached(priority: .utility) { [weak self] in
-            guard let self else { return }
+        self.tailscaleServeFallbackTask?.cancel()
+        let generation = self.generation
+        self.tailscaleServeFallbackTask = Task.detached(priority: .utility) { [weak self] in
+            guard !Task.isCancelled else { return }
             let beacons = await TailscaleServeGatewayDiscovery.discover(timeoutSeconds: timeoutSeconds)
             await MainActor.run { [weak self] in
-                guard let self else { return }
-                self.tailscaleServeFallbackGateways = self.mapTailscaleServeBeacons(beacons)
+                guard let self, self.generation == generation, !Task.isCancelled else { return }
+                self.tailscaleServeFallbackBeacons = beacons
                 self.recomputeGateways()
             }
         }
@@ -150,6 +155,7 @@ public final class GatewayDiscoveryModel {
     }
 
     public func stop() {
+        self.generation &+= 1
         self.localIdentityTask?.cancel()
         self.localIdentityTask = nil
         self.browserSession.stop()
@@ -160,17 +166,18 @@ public final class GatewayDiscoveryModel {
         self.pendingServiceResolvers = [:]
         self.wideAreaFallbackTask?.cancel()
         self.wideAreaFallbackTask = nil
-        self.wideAreaFallbackGateways = []
+        self.wideAreaFallback = nil
         self.tailscaleServeFallbackTask?.cancel()
         self.tailscaleServeFallbackTask = nil
-        self.tailscaleServeFallbackGateways = []
+        self.tailscaleServeFallbackBeacons = []
         self.gateways = []
         self.statusText = GatewayDiscoveryStatusText.stopped
     }
 
-    private func mapWideAreaBeacons(_ beacons: [WideAreaGatewayBeacon], domain: String) -> [DiscoveredGateway] {
-        beacons.map { beacon in
-            let stableID = "wide-area|\(domain)|\(beacon.instanceName)"
+    private var wideAreaFallbackGateways: [DiscoveredGateway] {
+        guard let fallback = self.wideAreaFallback else { return [] }
+        return fallback.beacons.map { beacon in
+            let stableID = "wide-area|\(fallback.domain)|\(beacon.instanceName)"
             let isLocal = Self.isLocalGateway(
                 lanHost: beacon.lanHost,
                 tailnetDns: beacon.tailnetDns,
@@ -194,10 +201,8 @@ public final class GatewayDiscoveryModel {
         }
     }
 
-    private func mapTailscaleServeBeacons(
-        _ beacons: [TailscaleServeGatewayBeacon]) -> [DiscoveredGateway]
-    {
-        beacons.map { beacon in
+    private var tailscaleServeFallbackGateways: [DiscoveredGateway] {
+        self.tailscaleServeFallbackBeacons.map { beacon in
             let stableID = "tailscale-serve|\(beacon.tailnetDns.lowercased())"
             let isLocal = Self.isLocalGateway(
                 lanHost: nil,
@@ -300,7 +305,7 @@ public final class GatewayDiscoveryModel {
            domain == wideAreaDomain,
            self.hasUsableWideAreaResults
         {
-            self.wideAreaFallbackGateways = []
+            self.wideAreaFallback = nil
         }
     }
 
@@ -308,6 +313,7 @@ public final class GatewayDiscoveryModel {
         guard let domain = OpenClawBonjour.wideAreaGatewayServiceDomain else { return }
         if Self.isRunningTests { return }
         guard self.wideAreaFallbackTask == nil else { return }
+        let generation = self.generation
         self.wideAreaFallbackTask = Task.detached(priority: .utility) { [weak self] in
             guard let self else { return }
             var attempt = 0
@@ -323,8 +329,8 @@ public final class GatewayDiscoveryModel {
                 let beacons = await WideAreaGatewayDiscovery.discover(timeoutSeconds: 2.0)
                 if !beacons.isEmpty {
                     await MainActor.run { [weak self] in
-                        guard let self else { return }
-                        self.wideAreaFallbackGateways = self.mapWideAreaBeacons(beacons, domain: domain)
+                        guard let self, self.generation == generation, !Task.isCancelled else { return }
+                        self.wideAreaFallback = (domain, beacons)
                         self.recomputeGateways()
                     }
                     return
@@ -340,6 +346,7 @@ public final class GatewayDiscoveryModel {
     private func scheduleTailscaleServeFallback() {
         if Self.isRunningTests { return }
         guard self.tailscaleServeFallbackTask == nil else { return }
+        let generation = self.generation
         self.tailscaleServeFallbackTask = Task.detached(priority: .utility) { [weak self] in
             guard let self else { return }
             var attempt = 0
@@ -355,8 +362,8 @@ public final class GatewayDiscoveryModel {
                 let beacons = await TailscaleServeGatewayDiscovery.discover(timeoutSeconds: 2.4)
                 if !beacons.isEmpty {
                     await MainActor.run { [weak self] in
-                        guard let self else { return }
-                        self.tailscaleServeFallbackGateways = self.mapTailscaleServeBeacons(beacons)
+                        guard let self, self.generation == generation, !Task.isCancelled else { return }
+                        self.tailscaleServeFallbackBeacons = beacons
                         self.recomputeGateways()
                     }
                     return
@@ -402,9 +409,7 @@ public final class GatewayDiscoveryModel {
         var seen = Set<String>()
         let deduped = gateways.filter { gateway in
             let key = Self.dedupeKey(for: gateway)
-            if seen.contains(key) { return false }
-            seen.insert(key)
-            return true
+            return seen.insert(key).inserted
         }
         return deduped.sorted {
             $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
@@ -468,7 +473,7 @@ public final class GatewayDiscoveryModel {
             cliPath: GatewayDiscoveryText.txtValue(txt, key: "cliPath"))
     }
 
-    public static func buildSSHTarget(user: String, host: String, port: Int) -> String {
+    public nonisolated static func buildSSHTarget(user: String, host: String, port: Int) -> String {
         var target = "\(user)@\(host)"
         if port != 22 {
             target += ":\(port)"
@@ -484,24 +489,21 @@ public final class GatewayDiscoveryModel {
     {
         guard self.resolvedServiceByID[stableID] == nil else { return }
         guard self.pendingServiceResolvers[stableID] == nil else { return }
+        let generation = self.generation
 
         let resolver = GatewayServiceResolver(
             name: serviceName,
             type: type,
             domain: domain,
             logger: self.logger)
-        { [weak self] result in
+        { [weak self] resolved in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, self.generation == generation else { return }
                 self.pendingServiceResolvers[stableID] = nil
-                switch result {
-                case let .success(resolved):
-                    self.resolvedServiceByID[stableID] = resolved
-                    self.updateGatewaysForAllDomains()
-                    self.recomputeGateways()
-                case .failure:
-                    break
-                }
+                guard let resolved else { return }
+                self.resolvedServiceByID[stableID] = resolved
+                self.updateGatewaysForAllDomains()
+                self.recomputeGateways()
             }
         }
 
@@ -571,42 +573,24 @@ public final class GatewayDiscoveryModel {
                 guard !Task.isCancelled, let self else { return }
                 guard self.localIdentity != merged else { return }
                 self.localIdentity = merged
+                self.updateGatewaysForAllDomains()
                 self.recomputeGateways()
             }
         }
     }
 
     private nonisolated static func buildLocalIdentityFast(displayName: String?) -> LocalIdentity {
-        var hostTokens: Set<String> = []
-        var displayTokens: Set<String> = []
-
-        let hostName = ProcessInfo.processInfo.hostName
-        if let token = normalizeHostToken(hostName) {
-            hostTokens.insert(token)
-        }
-
-        if let token = normalizeDisplayToken(displayName) {
-            displayTokens.insert(token)
-        }
-
-        return LocalIdentity(hostTokens: hostTokens, displayTokens: displayTokens)
+        self.localIdentity(hostName: ProcessInfo.processInfo.hostName, displayName: displayName)
     }
 
     private nonisolated static func buildLocalIdentitySlow() -> LocalIdentity {
-        var hostTokens: Set<String> = []
-        var displayTokens: Set<String> = []
+        self.localIdentity(hostName: Host.current().name, displayName: Host.current().localizedName)
+    }
 
-        if let host = Host.current().name,
-           let token = normalizeHostToken(host)
-        {
-            hostTokens.insert(token)
-        }
-
-        if let token = normalizeDisplayToken(Host.current().localizedName) {
-            displayTokens.insert(token)
-        }
-
-        return LocalIdentity(hostTokens: hostTokens, displayTokens: displayTokens)
+    private nonisolated static func localIdentity(hostName: String?, displayName: String?) -> LocalIdentity {
+        LocalIdentity(
+            hostTokens: Set(self.normalizeHostToken(hostName).map { [$0] } ?? []),
+            displayTokens: Set(self.normalizeDisplayToken(displayName).map { [$0] } ?? []))
     }
 
     private nonisolated static func normalizeHostToken(_ raw: String?) -> String? {
@@ -652,7 +636,7 @@ struct ResolvedGatewayService: Equatable {
 
 final class GatewayServiceResolver: NSObject, NetServiceDelegate {
     private let service: NetService
-    private let completion: (Result<ResolvedGatewayService, Error>) -> Void
+    private let completion: (ResolvedGatewayService?) -> Void
     private let logger: Logger
     private var didFinish = false
 
@@ -661,7 +645,7 @@ final class GatewayServiceResolver: NSObject, NetServiceDelegate {
         type: String,
         domain: String,
         logger: Logger,
-        completion: @escaping (Result<ResolvedGatewayService, Error>) -> Void)
+        completion: @escaping (ResolvedGatewayService?) -> Void)
     {
         self.service = NetService(domain: domain, type: type, name: name)
         self.completion = completion
@@ -675,12 +659,12 @@ final class GatewayServiceResolver: NSObject, NetServiceDelegate {
     }
 
     func cancel() {
-        self.finish(result: .failure(GatewayServiceResolverError.cancelled))
+        self.finish(result: nil)
     }
 
     func netServiceDidResolveAddress(_ sender: NetService) {
         let txt = Self.decodeTXT(sender.txtRecordData())
-        let host = Self.normalizeHost(sender.hostName)
+        let host = BonjourServiceResolverSupport.normalizeHost(sender.hostName)
         let port = sender.port > 0 ? sender.port : nil
         if !txt.isEmpty {
             let payload = self.formatTXT(txt)
@@ -688,14 +672,14 @@ final class GatewayServiceResolver: NSObject, NetServiceDelegate {
                 "discovery: resolved TXT for \(sender.name, privacy: .public): \(payload, privacy: .public)")
         }
         let resolved = ResolvedGatewayService(txt: txt, host: host, port: port)
-        self.finish(result: .success(resolved))
+        self.finish(result: resolved)
     }
 
-    func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
-        self.finish(result: .failure(GatewayServiceResolverError.resolveFailed(errorDict)))
+    func netService(_: NetService, didNotResolve _: [String: NSNumber]) {
+        self.finish(result: nil)
     }
 
-    private func finish(result: Result<ResolvedGatewayService, Error>) {
+    private func finish(result: ResolvedGatewayService?) {
         guard !self.didFinish else { return }
         self.didFinish = true
         self.service.stop()
@@ -705,19 +689,7 @@ final class GatewayServiceResolver: NSObject, NetServiceDelegate {
 
     private static func decodeTXT(_ data: Data?) -> [String: String] {
         guard let data else { return [:] }
-        let dict = NetService.dictionary(fromTXTRecord: data)
-        var out: [String: String] = [:]
-        out.reserveCapacity(dict.count)
-        for (key, value) in dict {
-            if let str = String(data: value, encoding: .utf8) {
-                out[key] = str
-            }
-        }
-        return out
-    }
-
-    private static func normalizeHost(_ raw: String?) -> String? {
-        BonjourServiceResolverSupport.normalizeHost(raw)
+        return NetService.dictionary(fromTXTRecord: data).compactMapValues { String(data: $0, encoding: .utf8) }
     }
 
     private func formatTXT(_ txt: [String: String]) -> String {
@@ -725,9 +697,4 @@ final class GatewayServiceResolver: NSObject, NetServiceDelegate {
             .map { "\($0.key)=\($0.value)" }
             .joined(separator: " ")
     }
-}
-
-enum GatewayServiceResolverError: Error {
-    case cancelled
-    case resolveFailed([String: NSNumber])
 }

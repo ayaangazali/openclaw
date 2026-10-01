@@ -1,5 +1,4 @@
 import crypto from "node:crypto";
-import path from "node:path";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { clearAutoFallbackPrimaryProbeSelection } from "../../agents/agent-scope.js";
 import { resolveSessionAuthSelection } from "../../agents/auth-profiles/session-override.js";
@@ -27,7 +26,7 @@ import {
   formatThinkingLevels,
   isThinkingLevelSupported,
   normalizeThinkLevel,
-  resolveSupportedThinkingLevel,
+  resolveThinkingSelectionForModel,
 } from "../thinking.js";
 import { removeDirectiveSpan } from "./directive-parsing.js";
 import type { PreparedReplyRunContext } from "./get-reply-run-context.js";
@@ -44,7 +43,7 @@ import {
 import { buildReplyPromptEnvelope } from "./prompt-prelude.js";
 import { resolveActiveRunQueueAction } from "./queue-policy.js";
 import { resolveQueueSettings } from "./queue/settings-runtime.js";
-import { getExistingFollowupQueue } from "./queue/state.js";
+import { hasPendingFollowupQueueWork } from "./queue/state.js";
 import {
   REPLY_RUN_IDLE_SETTLE_TIMEOUT_MS,
   interruptReplyRunTarget,
@@ -214,10 +213,8 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
           sessionId,
           isFirstTurnInSession,
           workspaceDir: context.skillsWorkspaceDir,
-          executionSkillsDir: path.join(
+          executionWorkspaceDir:
             sessionEntry?.worktree?.canonicalWorkspaceDir ?? context.workspaceDir,
-            "skills",
-          ),
           cfg,
           execOverrides: params.execOverrides,
           skillFilter: opts?.skillFilter,
@@ -238,7 +235,7 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
   }
   const allowedThinkingCatalog = modelState.allowedModelCatalog ?? [];
   let thinkingCatalog = allowedThinkingCatalog.length > 0 ? allowedThinkingCatalog : undefined;
-  let thinkingLevelSupported = isThinkingLevelSupported({
+  let thinkingSelection = resolveThinkingSelectionForModel({
     provider,
     model,
     level: resolvedThinkLevel,
@@ -246,7 +243,7 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
     agentRuntime: thinkingRuntime,
   });
   const shouldHydrateThinkingCatalog =
-    !thinkingLevelSupported ||
+    !thinkingSelection.supported ||
     (resolvedThinkLevel !== "off" &&
       !hasResolvedThinkingCatalogEntry({ catalog: thinkingCatalog, provider, model }));
   if (shouldHydrateThinkingCatalog) {
@@ -257,7 +254,7 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
     thinkingCatalog = await traceRunPhase("reply.resolve_thinking_catalog", () =>
       modelState.resolveThinkingCatalog({ provider, model }),
     );
-    thinkingLevelSupported = isThinkingLevelSupported({
+    thinkingSelection = resolveThinkingSelectionForModel({
       provider,
       model,
       level: resolvedThinkLevel,
@@ -265,7 +262,7 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
       agentRuntime: thinkingRuntime,
     });
   }
-  if (!thinkingLevelSupported) {
+  if (!thinkingSelection.supported) {
     const explicitThink =
       (directives.hasThinkDirective && directives.thinkLevel !== undefined) ||
       explicitThinkingLevelOverride !== undefined;
@@ -278,18 +275,9 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
         },
       } as const;
     }
-    const fallbackThinkLevel = resolveSupportedThinkingLevel({
-      provider,
-      model,
-      level: resolvedThinkLevel,
-      catalog: thinkingCatalog,
-      agentRuntime: thinkingRuntime,
-    });
-    if (fallbackThinkLevel !== resolvedThinkLevel) {
-      // Execution fallbacks are turn-local; directive/model persistence owns
-      // durable thinking remaps so explicit session overrides survive replies.
-      resolvedThinkLevel = fallbackThinkLevel;
-    }
+    // Execution fallbacks are turn-local; directive/model persistence owns
+    // durable thinking remaps so explicit session overrides survive replies.
+    resolvedThinkLevel = thinkingSelection.level;
   }
 
   const providedReplyOperation = opts?.replyOperation;
@@ -347,9 +335,13 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
     const latestSessionId = latestSessionEntry?.sessionId ?? sessionIdFinal;
     rebindProvidedReplyOperation(latestSessionId);
     opts?.onSessionPrepared?.({ sessionKey, sessionId: latestSessionId, storePath });
-    const sessionFile = storePath
-      ? formatSqliteSessionFileMarker({ agentId, sessionId: latestSessionId, storePath })
-      : resolveSessionFilePathCore(latestSessionId, latestSessionEntry, sessionFilePathOptions);
+    // Queued admission uses the scoped key too. A legacy marker for the same
+    // transcript would make unchanged tool authority fail the steering check.
+    const sessionFile =
+      normalizeOptionalString(sessionKey) ??
+      (storePath
+        ? formatSqliteSessionFileMarker({ agentId, sessionId: latestSessionId, storePath })
+        : resolveSessionFilePathCore(latestSessionId, latestSessionEntry, sessionFilePathOptions));
     return { sessionEntry: latestSessionEntry, sessionId: latestSessionId, sessionFile };
   };
   let preparedSessionState = resolvePreparedSessionState();
@@ -368,8 +360,9 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
   const resolveActiveEmbeddedSessionId = (sessionFile = preparedSessionState.sessionFile) =>
     embeddedAgentRuntime?.resolveActiveEmbeddedRunSessionId(sessionKey) ??
     embeddedAgentRuntime?.resolveActiveEmbeddedRunSessionIdBySessionFile?.(sessionFile);
+  const queueKey = sessionKey ?? sessionIdFinal;
   const sessionLaneKey = embeddedAgentRuntime
-    ? embeddedAgentRuntime.resolveEmbeddedSessionLane(sessionKey ?? sessionIdFinal)
+    ? embeddedAgentRuntime.resolveEmbeddedSessionLane(queueKey)
     : undefined;
   const laneSize = sessionLaneKey ? getQueueSize(sessionLaneKey) : 0;
   const activeRunQueueMode = effectiveResetTriggered ? "interrupt" : resolvedQueue.mode;
@@ -402,7 +395,15 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
     sessionLaneKey &&
     (laneSize > 0 || activeSessionIdForInterrupt)
   ) {
-    const cleared = clearCommandLane(sessionLaneKey);
+    // Keyless runs use an incarnation-unique sessionId lane; session-key lanes can be shared.
+    const cleared = sessionKey
+      ? (await import("./queue/cleanup.js")).clearSessionLifecycleLanes({
+          keys: [sessionKey],
+          agentId,
+          sessionKey,
+          assertCurrent: () => {},
+        })
+      : clearCommandLane(sessionLaneKey);
     logVerbose(`Cleared ${cleared} queued command(s) before interrupting ${sessionLaneKey}`);
   }
   const agentHarnessPolicy = useFastReplyRuntime
@@ -415,7 +416,7 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
         sessionKey: context.runtimePolicySessionKey,
       });
   const resolveRuntimeAuthProfile = async () => {
-    if (useFastReplyRuntime) {
+    if (useFastReplyRuntime && !params.configuredProfileId && !modelState.operatorModelOverride) {
       return {
         authProfileId: preparedSessionState.sessionEntry?.authProfileOverride,
         authProfileIdSource: resolveCollapsedSessionAuthPinSource(
@@ -423,7 +424,10 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
         ),
       };
     }
-    const shouldUseEphemeralSession = params.autoFallbackPrimaryProbe !== undefined;
+    const shouldUseEphemeralSession =
+      params.autoFallbackPrimaryProbe !== undefined ||
+      params.configuredProfileId !== undefined ||
+      modelState.operatorModelOverride === true;
     const authSessionKey = shouldUseEphemeralSession ? (sessionKey ?? sessionIdFinal) : sessionKey;
     const authSessionEntry =
       shouldUseEphemeralSession && preparedSessionState.sessionEntry
@@ -440,6 +444,8 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
       cfg,
       provider,
       modelId: model,
+      agentId,
+      configuredProfileId: params.configuredProfileId,
       ...(agentHarnessPolicy ? { harnessRuntime: agentHarnessPolicy.runtime } : {}),
       agentDir,
       sessionEntry: authSessionEntry,
@@ -463,16 +469,9 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
   const { runReplyAgent } = await traceRunPhase("reply.load_agent_runner_runtime", () =>
     loadAgentRunnerRuntime(),
   );
-  const queueKey = sessionKey ?? sessionIdFinal;
   preparedSessionState = resolvePreparedSessionState();
   const currentRouteThreadId = resolveRoutedDeliveryThreadId({ ctx, sessionKey });
   const applySlackRouteThreadSteeringGuard = isSlackDirectRoutedThreadTurn(ctx);
-  const resolveActiveRunAcceptsCurrentThread = (busy: { isActive: boolean }) => {
-    if (!busy.isActive || !sessionKey || !applySlackRouteThreadSteeringGuard) {
-      return true;
-    }
-    return routeThreadIdsMatch(resolveActiveReplyRunThreadId(sessionKey), currentRouteThreadId);
-  };
   const resolveActiveReplyOperationSessionId = () =>
     sessionKey ? resolveActiveReplyRunSessionId(sessionKey) : undefined;
   const resolveActiveQueueSessionId = () =>
@@ -516,8 +515,9 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
   };
   if (commandTurnContinuationTargetKey && providedReplyOperation) {
     const adoption = await admitReplyTurn({
-      sessionKey: commandTurnContinuationTargetKey,
+      providerReviewAcknowledgment: opts?.providerReviewAcknowledgment,
       agentId,
+      sessionKey: commandTurnContinuationTargetKey,
       sessionId: providedReplyOperation.sessionId,
       expectedSessionId: preparedSessionState.sessionEntry?.sessionId,
       storePath,
@@ -549,18 +549,14 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
     activeRunQueueMode === "interrupt" && sessionKey
       ? replyRunRegistry.resolveCurrentInterruptTarget(sessionKey)
       : undefined;
-  const pendingQueue = getExistingFollowupQueue(queueKey);
-  const queueAdmissionState = !pendingQueue
-    ? "empty"
-    : pendingQueue.items.some((item) => !item.steerPending) ||
-        pendingQueue.inFlight.size > 0 ||
-        pendingQueue.droppedCount > 0
-      ? "ready"
-      : "steering";
-  const activeRunAcceptsCurrentThread = resolveActiveRunAcceptsCurrentThread({ isActive });
+  const hasQueuedFollowups = hasPendingFollowupQueueWork([queueKey]);
+  const activeRunAcceptsCurrentThread =
+    !isActive ||
+    !sessionKey ||
+    !applySlackRouteThreadSteeringGuard ||
+    routeThreadIdsMatch(resolveActiveReplyRunThreadId(sessionKey), currentRouteThreadId);
   const shouldSteer =
     !isRoomEvent &&
-    queueAdmissionState !== "ready" &&
     activeRunAcceptsCurrentThread &&
     !context.isHeartbeat &&
     !effectiveResetTriggered &&
@@ -576,11 +572,10 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
           resolvedQueue.mode === "followup" ||
           resolvedQueue.mode === "collect")));
   const activeRunQueueAction = resolveActiveRunQueueAction({
-    queueAdmissionState,
+    hasQueuedFollowups,
     isActive,
     isHeartbeat: context.isHeartbeat,
     shouldFollowup,
-    queueMode: activeRunQueueMode,
     resetTriggered: effectiveResetTriggered,
   });
   if (isActive && activeRunQueueAction === "run-now") {
@@ -588,8 +583,6 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
       activeRunQueueAction,
       activeSessionId: activeSessionId ?? resolveActiveQueueSessionId(),
       queueMode: activeRunQueueMode,
-      sessionKey,
-      sessionId: sessionIdFinal,
       interruptActiveRun: async () => {
         if (activeRunInterruptTarget) {
           return (
@@ -618,7 +611,6 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
         preparedSessionState = resolvePreparedSessionState();
         // The interrupted run may have changed goal or suggestion state while admission waited.
         await refreshInboundContextAfterAdmissionWait();
-        sessionEntry = context.getSessionEntry();
         promptBodies = await traceRunPhase("reply.build_prompt_bodies", () =>
           rebuildPromptBodies(),
         );
@@ -650,7 +642,6 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
     resolvedThinkLevel,
     thinkLevelOverride,
     thinkingCatalog,
-    sessionEntry,
     skillsSnapshot,
     prefixedCommandBody,
     queuedBody,
@@ -661,7 +652,6 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
     currentInboundContext,
     isRoomEvent,
     providedReplyOperation,
-    sessionIdFinal,
     preparedSessionState,
     resolvedQueue,
     embeddedAgentRuntime,
@@ -671,7 +661,7 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
     queueKey,
     shouldSteer,
     shouldFollowup,
-    queueAdmissionState,
+    hasQueuedFollowups,
     isActive,
     authProfileId,
     authProfileIdSource,

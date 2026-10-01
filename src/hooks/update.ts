@@ -1,4 +1,3 @@
-// Hook update helpers refresh installed hook records and config references.
 import { expectDefined } from "@openclaw/normalization-core";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
@@ -85,7 +84,6 @@ function createHookPackUpdateIntegrityDriftHandler(params: {
 /** Update npm-installed hook packs and return config changes plus per-pack outcomes. */
 export async function updateNpmInstalledHookPacks(params: {
   config: OpenClawConfig;
-  dangerouslyForceUnsafeInstall?: boolean;
   onInstallPolicyWarning?: InstallSafetyOverrides["onInstallPolicyWarning"];
   logger?: HookPackUpdateLogger;
   hookIds?: string[];
@@ -170,7 +168,6 @@ export async function updateNpmInstalledHookPacks(params: {
       requestDeferredPackageDirInstall(
         {
           config: params.config,
-          dangerouslyForceUnsafeInstall: params.dangerouslyForceUnsafeInstall,
           onInstallPolicyWarning: params.onInstallPolicyWarning,
           spec: effectiveSpec,
           mode: "update",

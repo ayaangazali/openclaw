@@ -3,9 +3,11 @@ import { resolveAgentModelTimeoutMsValue } from "../config/model-input.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { parseImageGenerationModelRef } from "../media-generation/model-ref.js";
+import { createMediaProviderLookup } from "../media-generation/provider-registry.js";
 import {
   getImageGenerationProvider,
   listImageGenerationProviders,
+  withImageGenerationProviders,
 } from "../media-generation/registry.js";
 import {
   buildMediaGenerationNormalizationMetadata,
@@ -15,7 +17,7 @@ import {
   resolveReferenceImageCapabilityError,
   runMediaGenerationCandidates,
 } from "../media-generation/runtime-shared.js";
-import { getProviderEnvVars } from "../secrets/provider-env-vars.js";
+import { getProviderEnvVarsCore } from "../secrets/provider-env-vars.js";
 import { resolveImageGenerationMaxInputImages } from "./capabilities.js";
 import { resolveImageGenerationOverrides } from "./normalization.js";
 import type { GenerateImageParams, GenerateImageRuntimeResult } from "./runtime-types.js";
@@ -29,7 +31,7 @@ const log = createSubsystemLogger("image-generation");
 type ImageGenerationRuntimeDeps = {
   getProvider?: typeof getImageGenerationProvider;
   listProviders?: typeof listImageGenerationProviders;
-  getProviderEnvVars?: typeof getProviderEnvVars;
+  getProviderEnvVars?: typeof getProviderEnvVarsCore;
   log?: Pick<typeof log, "warn">;
 };
 
@@ -59,6 +61,23 @@ export function listRuntimeImageGenerationProviders(
 export async function generateImage(
   params: GenerateImageParams,
   deps: ImageGenerationRuntimeDeps = {},
+): Promise<GenerateImageRuntimeResult> {
+  if (deps.getProvider && deps.listProviders) {
+    return runImageGeneration(params, deps);
+  }
+  return withImageGenerationProviders(params.cfg, (providers) => {
+    const lookup = createMediaProviderLookup(providers);
+    return runImageGeneration(params, {
+      ...deps,
+      getProvider: deps.getProvider ?? lookup.getProvider,
+      listProviders: deps.listProviders ?? lookup.listProviders,
+    });
+  });
+}
+
+async function runImageGeneration(
+  params: GenerateImageParams,
+  deps: ImageGenerationRuntimeDeps,
 ): Promise<GenerateImageRuntimeResult> {
   const getProvider = deps.getProvider ?? getImageGenerationProvider;
   const listProviders = deps.listProviders ?? listImageGenerationProviders;

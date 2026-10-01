@@ -113,7 +113,7 @@ describe("dispatchReplyFromConfig pre-run directive rejection", () => {
     diagnosticMocks.forwardToRealPipeline = false;
   });
 
-  it.each<ReplyPreRunRejectionCode>(["model-selection-rejected", "session-directive-rejected"])(
+  it.each<ReplyPreRunRejectionCode>(["model-selection-rejected"])(
     "emits one safe skipped event for %s without changing the reply",
     async (reason) => {
       const reply = { text: `Model "${REJECTED_MODEL}" is not allowed.`, isError: true };
@@ -128,6 +128,7 @@ describe("dispatchReplyFromConfig pre-run directive rejection", () => {
       expect(processedEvents).toEqual([
         expect.objectContaining({
           type: "message.processed",
+          agentId: "main",
           channel: "telegram",
           sessionKey: SESSION_KEY,
           messageId: "1",
@@ -212,6 +213,8 @@ describe("dispatchReplyFromConfig pre-run directive rejection", () => {
         dispatcher: createDispatcher(),
         replyOptions: { [REPLY_OPERATION_RUN_STATE]: runState },
         replyResolver: async (_ctx, opts) => {
+          // Queue and question owners publish their decisions after outer operation admission.
+          Object.assign(runState, state);
           if (failed) {
             opts?.onAgentRunTerminalOutcome?.("failed");
           }

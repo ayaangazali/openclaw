@@ -1,14 +1,8 @@
-/**
- * Analyzes injected workspace bootstrap files and builds warnings when context
- * was truncated before an agent sees it.
- */
 import path from "node:path";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import { normalizeUniqueTrimmedStringList } from "@openclaw/normalization-core/string-normalization";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import {
-  buildBootstrapPromptWarning,
-  normalizeBootstrapWarningSignatures,
-} from "./bootstrap-budget-warning.js";
+import { buildBootstrapPromptWarning } from "./bootstrap-budget-warning.js";
 import type {
   BootstrapBudgetAnalysis,
   BootstrapInjectionStat,
@@ -16,12 +10,12 @@ import type {
   BootstrapPromptWarningMode,
   BootstrapTruncationCause,
 } from "./bootstrap-budget.types.js";
-import type { EmbeddedContextFile } from "./embedded-agent-helpers.js";
 import {
   resolveBootstrapMaxChars,
   resolveBootstrapTotalMaxChars,
   USER_BOOTSTRAP_MAX_CHARS,
 } from "./embedded-agent-helpers/bootstrap.js";
+import type { EmbeddedContextFile } from "./embedded-agent-helpers/context-file.js";
 import type { WorkspaceBootstrapFile } from "./workspace.js";
 
 const DEFAULT_BOOTSTRAP_NEAR_LIMIT_RATIO = 0.85;
@@ -49,6 +43,18 @@ function effectiveBootstrapFileLimit(name: string, bootstrapMaxChars: number): n
     : bootstrapMaxChars;
 }
 
+/**
+ * USER.md carries a deliberate fixed cap: tuning bootstrapMaxChars can only
+ * lower it, so per-file remediation must never suggest raising that setting
+ * for it. The effective limit equals the fixed cap exactly when the cap (not
+ * the configured limit) is the binding constraint.
+ */
+export function isFixedUserCapFile(file: { name: string; effectiveFileLimit: number }): boolean {
+  return (
+    file.name.toLowerCase() === "user.md" && file.effectiveFileLimit === USER_BOOTSTRAP_MAX_CHARS
+  );
+}
+
 /** Restores prompt-warning dedupe state from a previous bootstrap report. */
 export function resolveBootstrapWarningSignaturesSeen(report?: {
   bootstrapTruncation?: {
@@ -58,7 +64,7 @@ export function resolveBootstrapWarningSignaturesSeen(report?: {
   };
 }): string[] {
   const truncation = report?.bootstrapTruncation;
-  const seenFromReport = normalizeBootstrapWarningSignatures(truncation?.warningSignaturesSeen);
+  const seenFromReport = normalizeUniqueTrimmedStringList(truncation?.warningSignaturesSeen);
   if (seenFromReport.length > 0) {
     return seenFromReport;
   }
@@ -66,10 +72,7 @@ export function resolveBootstrapWarningSignaturesSeen(report?: {
   if (truncation?.warningMode === "off") {
     return [];
   }
-  const single =
-    typeof truncation?.promptWarningSignature === "string"
-      ? (normalizeOptionalString(truncation.promptWarningSignature) ?? "")
-      : "";
+  const single = normalizeOptionalString(truncation?.promptWarningSignature);
   return single ? [single] : [];
 }
 
@@ -100,7 +103,7 @@ export function buildBootstrapInjectionStats(params: {
       (normalizedPath ? path.posix.basename(normalizedPath) : "bootstrap");
     const rawChars = file.missing ? 0 : (file.content ?? "").trimEnd().length;
     const injected = pathValue ? injectedByPath.get(pathValue) : undefined;
-    const injectedChars = injected ? injected.length : 0;
+    const injectedChars = injected?.length ?? 0;
     const truncated = !file.missing && injectedChars < rawChars;
     return {
       name,

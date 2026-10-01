@@ -2,6 +2,7 @@
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { readAgentRosterProperty } from "../../../agents/agent-scope-config.js";
 import { migrateLegacyContextBudgetConfig } from "../../../config/legacy.context-budget.js";
+import { removeLegacyCopilotDiscovery } from "../../../config/legacy.github-copilot.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import { HeartbeatSchema } from "../../../config/zod-schema.agent-runtime.js";
 import { runPluginSetupConfigMigrations } from "../../../plugins/setup-registry.js";
@@ -125,20 +126,23 @@ export function normalizeCompatibilityConfigValues(
   warnings?: string[];
 } {
   const changes: string[] = [];
-  let contextBudgetConfig = cfg;
-  let contextBudgetWarnings: string[];
-  if (options.sourceConfigBeforeMigrations === undefined) {
-    const migration = migrateLegacyContextBudgetConfig(cfg);
-    contextBudgetConfig = migration.config;
-    changes.push(...migration.changes.map(({ message }) => message));
-    contextBudgetWarnings = migration.warnings.map(({ message }) => message);
-  } else {
-    const migration = migrateLegacyContextBudgetConfig(options.sourceConfigBeforeMigrations);
-    changes.push(...migration.changes.map(({ message }) => message));
-    contextBudgetWarnings = migration.warnings.map(({ message }) => message);
+  const copilotConfig = removeLegacyCopilotDiscovery(cfg);
+  if (copilotConfig !== cfg) {
+    changes.push(
+      "The GitHub Copilot discovery switch was retired and has been removed. Configured Copilot access now refreshes its model list automatically. Use the model allow list (agents.defaults.modelPolicy.allow) to hide Copilot models; it does not stop discovery requests.",
+    );
   }
+  const contextBudget =
+    options.sourceConfigBeforeMigrations === undefined
+      ? migrateLegacyContextBudgetConfig(copilotConfig)
+      : {
+          ...migrateLegacyContextBudgetConfig(options.sourceConfigBeforeMigrations),
+          config: copilotConfig,
+        };
+  changes.push(...contextBudget.changes.map(({ message }) => message));
+  const contextBudgetWarnings = contextBudget.warnings.map(({ message }) => message);
   const reservedMcpServerNames = migrateReservedMcpServerNames(
-    contextBudgetConfig,
+    contextBudget.config,
     options.sourceRaw,
   );
   changes.push(...reservedMcpServerNames.changes);
@@ -158,11 +162,11 @@ export function normalizeCompatibilityConfigValues(
     options.blockedModelIdentities,
   );
   const tuningCandidate = structuredClone(next);
-  if (stripRetiredTuningKnobs(tuningCandidate)) {
+  if (stripRetiredTuningKnobs(tuningCandidate, changes)) {
     next = tuningCandidate;
-    changes.push("Removed retired runtime tuning knobs; built-in defaults now apply.");
   }
   const channelMigrations = applyChannelDoctorCompatibilityMigrations(next);
+  contextBudgetWarnings.push(...(channelMigrations.warnings ?? []));
   if (channelMigrations.changes.length > 0) {
     next = channelMigrations.next;
     changes.push(...channelMigrations.changes);

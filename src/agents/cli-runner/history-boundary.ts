@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import {
   isKnownCliHistoryBoundary,
+  runWithCliHistoryWriter,
   type CliHistoryBoundary,
   type CliHistoryWriter,
 } from "../../config/sessions/cli-history-boundary.js";
@@ -16,7 +16,12 @@ import {
 import { resolveSessionTranscriptReadFence } from "../../config/sessions/session-transcript-read-fence.js";
 import { assertOwnedTranscriptWriteCommit } from "../../config/sessions/transcript-write-context.js";
 import type { InternalSessionEntry } from "../../config/sessions/types.js";
-import { resolveAdmittedRunActiveAssertion } from "../admitted-run-context.js";
+import { bindAgentRunTerminalWriteContext } from "../../infra/agent-run-terminal-writes.js";
+import { sha256Hex } from "../../infra/crypto-digest.js";
+import {
+  getAdmittedRunDelegatedAuthority,
+  resolveAdmittedRunActiveAssertion,
+} from "../admitted-run-context.js";
 import type { AuthProfileCredential } from "../auth-profiles/types.js";
 import { buildSessionContext, SessionManager } from "../sessions/session-manager.js";
 import { createCliRunCurrentAssertion } from "./execution-target.js";
@@ -44,7 +49,7 @@ export async function prepareCliHistoryBoundary(
   }
   const target = { ...source, storePath: resolveSessionTranscriptDatabasePath(source) };
   const assertCurrent = createCliRunCurrentAssertion(params);
-  await waitForSessionTranscriptProjection(target);
+  await waitForSessionTranscriptProjection(target, params.abortSignal);
   assertCurrent();
   const snapshot: InternalSessionEntry | undefined = loadSessionEntryReadOnly(target);
   if (!snapshot || snapshot.sessionId !== target.sessionId) {
@@ -79,9 +84,7 @@ export async function prepareCliHistoryBoundary(
           ? ["token", credential.provider, credential.token]
           : undefined;
   const fingerprint = owner
-    ? createHash("sha256")
-        .update(JSON.stringify(["cli-history-v1", normalizeProviderId(params.provider), owner]))
-        .digest("hex")
+    ? sha256Hex(JSON.stringify(["cli-history-v1", normalizeProviderId(params.provider), owner]))
     : undefined;
   const writerRunId = params.expectedWriterRunId ?? params.runId;
   let allowed = Boolean(
@@ -103,13 +106,17 @@ export async function prepareCliHistoryBoundary(
     !params.cliSessionBinding
   ) {
     let truncated = false;
-    const branch = SessionManager.openBounded(target, {
-      maxBytes: 1024 * 1024,
-      maxEvents: 100,
-      onTruncated: () => {
-        truncated = true;
-      },
-    }).getBranch();
+    const branch = (
+      await SessionManager.openBoundedAsync(target, {
+        signal: params.abortSignal,
+        maxBytes: 1024 * 1024,
+        maxEvents: 100,
+        onTruncated: () => {
+          truncated = true;
+        },
+      })
+    ).getBranch();
+    assertCurrent();
     // Bookkeeping is not a conversation. Retained reset rows, summaries, custom
     // context, missing anchors and bounded cuts must never look like a fresh start.
     allowed = !truncated && buildSessionContext(branch).messages.length === 0;
@@ -143,8 +150,7 @@ export async function prepareCliHistoryBoundary(
       ) {
         throw new Error("CLI history owner changed before preparation");
       }
-      const patch: Partial<InternalSessionEntry> = { cliHistoryBoundary: boundary };
-      return patch;
+      return { cliHistoryBoundary: boundary };
     },
     {
       preserveActivity: true,
@@ -171,7 +177,7 @@ export async function prepareCliHistoryBoundary(
     }
     assertActive();
   };
-  return {
+  const writer: CliHistoryWriter = {
     target: { ...target },
     runId: writerRunId,
     authFingerprint: boundary.authFingerprint,
@@ -199,4 +205,12 @@ export async function prepareCliHistoryBoundary(
       }
     },
   };
+  const authority = getAdmittedRunDelegatedAuthority(params.admittedRunContext);
+  if (!authority) {
+    throw new Error("CLI history writer is no longer active");
+  }
+  bindAgentRunTerminalWriteContext(authority, {
+    run: (write) => runWithCliHistoryWriter(writer, write),
+  });
+  return writer;
 }

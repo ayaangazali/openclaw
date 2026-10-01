@@ -1,4 +1,5 @@
-/** Process-local prompt projection state owned by an embedded session lifecycle. */
+/** Transcript-backed prompt projection state cached by an embedded session lifecycle. */
+import { sha256Hex } from "@openclaw/normalization-core/node-crypto";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { pruneMapToMaxSize } from "../../infra/map-size.js";
 import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
@@ -13,6 +14,7 @@ export type ToolResultPromptProjectionState = {
   sourceHashByKey: Map<string, string>;
   /** Cache-TTL marks read from the transcript marker; the projection owner materializes them on the next replay. */
   restoredCacheTtl: Map<string, RestoredCacheTtlMark>;
+  lastWrittenSnapshotHash?: string;
 };
 
 type RestoredCacheTtlMark = { mode: "soft" } | { mode: "hard"; placeholder: string };
@@ -41,14 +43,6 @@ export function createToolResultPromptProjectionState(): ToolResultPromptProject
   };
 }
 
-function createSessionPromptState(): EmbeddedSessionPromptState {
-  return {
-    activeProjectKeys: [],
-    toolResults: createToolResultPromptProjectionState(),
-    sentUserTurnIds: new Set<string>(),
-  };
-}
-
 export function cloneToolResultPromptProjectionState(
   state: ToolResultPromptProjectionState,
 ): ToolResultPromptProjectionState {
@@ -58,6 +52,7 @@ export function cloneToolResultPromptProjectionState(
     ambiguousBaseKeys: new Set(state.ambiguousBaseKeys),
     sourceHashByKey: new Map(state.sourceHashByKey),
     restoredCacheTtl: new Map(state.restoredCacheTtl),
+    lastWrittenSnapshotHash: state.lastWrittenSnapshotHash,
   };
 }
 
@@ -81,7 +76,7 @@ export function recordToolResultPromptProjection(
   });
 }
 
-/** Marker payload stays key-sized: soft trims are recomputed from canonical history, hard clears keep only their placeholder. */
+/** TTL trims are re-derived; ordinary trims retain only text, never images or tool metadata. */
 export function serializeCacheTtlToolResultProjections(state: ToolResultPromptProjectionState) {
   const marks = new Map(state.restoredCacheTtl);
   for (const [key, projection] of state.replacements) {
@@ -97,6 +92,25 @@ export function serializeCacheTtlToolResultProjections(state: ToolResultPromptPr
   return {
     prunedToolResults: [...marks].map(([key, mark]) => Object.assign({ key }, mark)),
     ambiguousToolResultBaseKeys: [...state.ambiguousBaseKeys],
+    frozenToolResults: [...state.sourceHashByKey].flatMap(([key, sourceHash]) => {
+      if (!state.frozen.has(key)) {
+        return [];
+      }
+      const projection = state.replacements.get(key);
+      return [
+        {
+          key,
+          sourceHash,
+          ...(!projection?.cacheTtl && projection
+            ? {
+                texts: projection.content.flatMap((block) =>
+                  block.type === "text" ? [block.text] : [],
+                ),
+              }
+            : {}),
+        },
+      ];
+    }),
   };
 }
 
@@ -107,10 +121,37 @@ export function getEmbeddedSessionPromptState(sessionId: string): EmbeddedSessio
     sessionPromptStates.set(sessionId, existing);
     return existing;
   }
-  const created = createSessionPromptState();
+  const created: EmbeddedSessionPromptState = {
+    activeProjectKeys: [],
+    toolResults: createToolResultPromptProjectionState(),
+    sentUserTurnIds: new Set(),
+  };
   sessionPromptStates.set(sessionId, created);
   pruneMapToMaxSize(sessionPromptStates, MAX_SESSION_PROMPT_STATES);
   return created;
+}
+
+export function hashToolResultProjectionSnapshot(
+  snapshot: ReturnType<typeof serializeCacheTtlToolResultProjections>,
+): string {
+  return sha256Hex(JSON.stringify(snapshot));
+}
+
+export function persistToolResultProjections(
+  state: ToolResultPromptProjectionState,
+  appendEntry: (customType: string, data: unknown) => void,
+): void {
+  if (state.frozen.size === 0) {
+    return;
+  }
+  const snapshot = serializeCacheTtlToolResultProjections(state);
+  const hash = hashToolResultProjectionSnapshot(snapshot);
+  if (hash === state.lastWrittenSnapshotHash) {
+    return;
+  }
+  appendEntry("openclaw.cache-ttl", snapshot);
+  // A failed owned write must leave the snapshot eligible for persistence.
+  state.lastWrittenSnapshotHash = hash;
 }
 
 /** Records the prepared repository identity and snapshots this session's LRU active set. */
@@ -130,7 +171,6 @@ export function prepareEmbeddedSessionActiveProjectKeys(
       MAX_ACTIVE_PROJECT_KEYS,
     );
   }
-  // Consumers use set membership today; LRU order is retained for a possible future graduated boost.
   return [...state.activeProjectKeys];
 }
 

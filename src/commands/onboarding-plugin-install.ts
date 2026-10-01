@@ -6,13 +6,11 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { expectDefined } from "@openclaw/normalization-core";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { stripAnsi } from "../../packages/terminal-core/src/ansi.js";
 import { sanitizeTerminalText } from "../../packages/terminal-core/src/safe-text.js";
-import { resolveBundledInstallPlanForCatalogEntry } from "../cli/plugin-install-plan.js";
-import { assertConfigWriteAllowedInCurrentMode } from "../config/nix-mode-write-guard.js";
+import { assertConfigWriteAllowedInCurrentMode } from "../config/config-write-guard.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { parseClawHubPluginSpec } from "../infra/clawhub-spec.js";
 import { parseRegistryNpmSpec } from "../infra/npm-registry-spec.js";
@@ -49,6 +47,7 @@ import {
   ALLOW_PLUGIN_INSTALL_OVERRIDES_ENV,
 } from "../plugins/install-overrides.js";
 import { resolveDefaultPluginExtensionsDir } from "../plugins/install-paths.js";
+import { resolveBundledInstallPlanForCatalogEntry } from "../plugins/install-source-plan.js";
 import {
   isUnavailableNpmTarget,
   type PluginInstallArtifactConsentHandler,
@@ -428,44 +427,15 @@ async function promptInstallChoice(params: {
     });
   }
 
-  if (params.autoConfirmSingleSource) {
-    const realSources: InstallChoice[] = [];
-    if (safeClawHubSpec) {
-      realSources.push("clawhub");
-    }
-    if (safeNpmSpec) {
-      realSources.push("npm");
-    }
-    if (params.localPath) {
-      realSources.push("local");
-    }
-    if (realSources.length === 1) {
-      return expectDefined(realSources[0], "real sources entry at 0");
-    }
+  if (params.autoConfirmSingleSource && options.length === 1) {
+    return options[0]!.value;
   }
 
   options.push({ value: "skip", label: t("common.skipForNow") });
 
-  const initialValue =
-    params.defaultChoice === "local" && !params.localPath
-      ? clawhubSpec
-        ? "clawhub"
-        : npmSpec
-          ? "npm"
-          : "skip"
-      : params.defaultChoice === "clawhub" && !clawhubSpec
-        ? npmSpec
-          ? "npm"
-          : params.localPath
-            ? "local"
-            : "skip"
-        : params.defaultChoice === "npm" && !npmSpec
-          ? clawhubSpec
-            ? "clawhub"
-            : params.localPath
-              ? "local"
-              : "skip"
-          : params.defaultChoice;
+  const initialValue = ([params.defaultChoice, "clawhub", "npm", "local", "skip"] as const).find(
+    (choice) => options.some((option) => option.value === choice),
+  );
 
   return await params.prompter.select<InstallChoice>({
     message: t("wizard.plugins.installPluginPrompt", { plugin: safeLabel }),
@@ -481,22 +451,6 @@ function formatDurationLabel(timeoutMs: number): string {
   }
   const seconds = Math.round(timeoutMs / 1000);
   return t(seconds === 1 ? "common.second" : "common.seconds", { count: seconds });
-}
-
-function formatPluginInstallProgress(label: string): string {
-  return t("wizard.plugins.installingPlugin", { plugin: label });
-}
-
-function formatPluginInstalled(label: string): string {
-  return t("wizard.plugins.installedPlugin", { plugin: label });
-}
-
-function formatPluginInstallFailed(label: string): string {
-  return t("wizard.plugins.installFailedShort", { plugin: label });
-}
-
-function formatPluginInstallTimedOut(label: string): string {
-  return t("wizard.plugins.installTimedOutShort", { plugin: label });
 }
 
 function formatPluginInstallTimedOutNote(spec: string): string {
@@ -697,6 +651,20 @@ function isClawHubTrustWarning(message: string): boolean {
   );
 }
 
+function startPluginInstallProgress(prompter: WizardPrompter, safeLabel: string) {
+  const progress = prompter.progress(t("wizard.plugins.installingPlugin", { plugin: safeLabel }));
+  progress.update(t("wizard.plugins.preparingInstall"));
+  return {
+    progress,
+    updateProgress: (message: string) => {
+      const sanitized = sanitizeTerminalText(message).trim();
+      if (sanitized) {
+        progress.update(sanitized);
+      }
+    },
+  };
+}
+
 async function runInstallWatchdog<T>(install: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const controller = new AbortController();
   const ownedInstallPromise = install(controller.signal);
@@ -719,7 +687,6 @@ async function runOnboardingPluginInstallWithProgress(params: {
   runtime: RuntimeEnv;
   spec: string;
   onCapabilityConsent: PluginCapabilityConsentHandler;
-  reviewOfficialArtifacts?: boolean;
   beforePersistentEffect?: () => void | Promise<void>;
   install: (
     logger: {
@@ -735,22 +702,13 @@ async function runOnboardingPluginInstallWithProgress(params: {
   const capabilityConsent = await prepareManagedPluginArtifactConsentHandler({
     config: params.cfg,
     source: "npm",
-    reviewOfficialArtifacts: params.reviewOfficialArtifacts,
     spec: params.spec,
     expectedIntegrity: params.entry.install.expectedIntegrity,
     onCapabilityConsent: consent.onCapabilityConsent,
     beforePersistentEffect: params.beforePersistentEffect,
   });
   const safeLabel = sanitizeTerminalText(params.entry.label);
-  const progress = params.prompter.progress(formatPluginInstallProgress(safeLabel));
-  progress.update(t("wizard.plugins.preparingInstall"));
-  const updateProgress = (message: string) => {
-    const sanitized = sanitizeTerminalText(message).trim();
-    if (!sanitized) {
-      return;
-    }
-    progress.update(sanitized);
-  };
+  const { progress, updateProgress } = startPluginInstallProgress(params.prompter, safeLabel);
 
   try {
     const result = await runInstallWatchdog((signal) =>
@@ -767,15 +725,20 @@ async function runOnboardingPluginInstallWithProgress(params: {
       ),
     );
     progress.stop(
-      result.ok ? formatPluginInstalled(safeLabel) : formatPluginInstallFailed(safeLabel),
+      t(result.ok ? "wizard.plugins.installedPlugin" : "wizard.plugins.installFailedShort", {
+        plugin: safeLabel,
+      }),
     );
     consent.rethrowCallbackError();
     return { status: "completed", result, capabilityConsent };
   } catch (error) {
     progress.stop(
-      isTimeoutError(error)
-        ? formatPluginInstallTimedOut(safeLabel)
-        : formatPluginInstallFailed(safeLabel),
+      t(
+        isTimeoutError(error)
+          ? "wizard.plugins.installTimedOutShort"
+          : "wizard.plugins.installFailedShort",
+        { plugin: safeLabel },
+      ),
     );
     consent.rethrowCallbackError();
     if (isTimeoutError(error)) {
@@ -802,7 +765,6 @@ async function installPluginFromNpmSpecWithProgress(params: {
   prompter: WizardPrompter;
   runtime: RuntimeEnv;
   onCapabilityConsent: PluginCapabilityConsentHandler;
-  reviewOfficialArtifacts?: boolean;
   beforePersistentEffect?: () => void | Promise<void>;
   trustedSourceLinkedOfficialInstall?: boolean;
 }): Promise<InstallOutcome<InstallPluginResult>> {
@@ -836,7 +798,6 @@ async function installPluginFromNpmPackArchiveWithProgress(params: {
   prompter: WizardPrompter;
   runtime: RuntimeEnv;
   onCapabilityConsent: PluginCapabilityConsentHandler;
-  reviewOfficialArtifacts?: boolean;
   beforePersistentEffect?: () => void | Promise<void>;
 }): Promise<InstallOutcome<InstallPluginResult & { npmTarballName?: string }>> {
   return await runOnboardingPluginInstallWithProgress({
@@ -866,7 +827,6 @@ async function installPluginFromOverride(params: {
   prompter: WizardPrompter;
   runtime: RuntimeEnv;
   onCapabilityConsent: PluginCapabilityConsentHandler;
-  reviewOfficialArtifacts?: boolean;
   beforePersistentEffect?: () => void | Promise<void>;
 }): Promise<OnboardingPluginInstallResult> {
   const { entry, prompter, runtime } = params;
@@ -884,7 +844,6 @@ async function installPluginFromOverride(params: {
           prompter,
           runtime,
           onCapabilityConsent: params.onCapabilityConsent,
-          reviewOfficialArtifacts: params.reviewOfficialArtifacts,
           beforePersistentEffect: params.beforePersistentEffect,
           trustedSourceLinkedOfficialInstall: false,
         })
@@ -895,7 +854,6 @@ async function installPluginFromOverride(params: {
           prompter,
           runtime,
           onCapabilityConsent: params.onCapabilityConsent,
-          reviewOfficialArtifacts: params.reviewOfficialArtifacts,
           beforePersistentEffect: params.beforePersistentEffect,
         });
 
@@ -926,32 +884,29 @@ async function installPluginFromOverride(params: {
     params.override.kind === "npm-pack"
       ? (result as InstallPluginResult & { npmTarballName?: string }).npmTarballName
       : undefined;
-  const install =
-    params.override.kind === "npm-pack"
-      ? ({
-          pluginId: result.pluginId,
-          source: "npm",
-          spec: result.npmResolution?.resolvedSpec ?? result.manifestName ?? result.pluginId,
-          sourcePath: params.override.archivePath,
-          installPath: result.targetDir,
-          ...(result.version ? { version: result.version } : {}),
-          ...buildNpmResolutionInstallFields(result.npmResolution),
-          artifactKind: "npm-pack",
-          artifactFormat: "tgz",
+  const install = {
+    pluginId: result.pluginId,
+    source: "npm" as const,
+    spec:
+      params.override.kind === "npm-pack"
+        ? (result.npmResolution?.resolvedSpec ?? result.manifestName ?? result.pluginId)
+        : params.override.spec,
+    ...(params.override.kind === "npm-pack" ? { sourcePath: params.override.archivePath } : {}),
+    installPath: result.targetDir,
+    ...(result.version ? { version: result.version } : {}),
+    ...buildNpmResolutionInstallFields(result.npmResolution),
+    ...(params.override.kind === "npm-pack"
+      ? {
+          artifactKind: "npm-pack" as const,
+          artifactFormat: "tgz" as const,
           ...(result.npmResolution?.integrity
             ? { npmIntegrity: result.npmResolution.integrity }
             : {}),
           ...(result.npmResolution?.shasum ? { npmShasum: result.npmResolution.shasum } : {}),
           ...(npmTarballName ? { npmTarballName } : {}),
-        } as const)
-      : ({
-          pluginId: result.pluginId,
-          source: "npm",
-          spec: params.override.spec,
-          installPath: result.targetDir,
-          ...(result.version ? { version: result.version } : {}),
-          ...buildNpmResolutionInstallFields(result.npmResolution),
-        } as const);
+        }
+      : {}),
+  };
   return await finishOnboardingPluginInstall({
     cfg: params.cfg,
     pluginId: result.pluginId,
@@ -969,29 +924,19 @@ async function installPluginFromClawHubSpecWithProgress(params: {
   prompter: WizardPrompter;
   runtime: RuntimeEnv;
   onCapabilityConsent: PluginCapabilityConsentHandler;
-  reviewOfficialArtifacts?: boolean;
   beforePersistentEffect?: () => void | Promise<void>;
 }): Promise<{ result: InstallPluginFromClawHubResult; capabilityConsent: ArtifactConsent }> {
   const consent = capturePluginCapabilityConsentHandlerErrors(params.onCapabilityConsent);
   const capabilityConsent = await prepareManagedPluginArtifactConsentHandler({
     config: params.cfg,
     source: "clawhub",
-    reviewOfficialArtifacts: params.reviewOfficialArtifacts,
     spec: params.clawhubSpec,
     expectedIntegrity: params.entry.install.expectedIntegrity,
     onCapabilityConsent: consent.onCapabilityConsent,
     beforePersistentEffect: params.beforePersistentEffect,
   });
   const safeLabel = sanitizeTerminalText(params.entry.label);
-  const progress = params.prompter.progress(formatPluginInstallProgress(safeLabel));
-  progress.update(t("wizard.plugins.preparingInstall"));
-  const updateProgress = (message: string) => {
-    const sanitized = sanitizeTerminalText(message).trim();
-    if (!sanitized) {
-      return;
-    }
-    progress.update(sanitized);
-  };
+  const { progress, updateProgress } = startPluginInstallProgress(params.prompter, safeLabel);
   let renderedTrustWarning = false;
   const renderTrustWarning = (message: string) => {
     logInstallWarningWithLineBreaks(params.runtime, message);
@@ -1029,15 +974,15 @@ async function installPluginFromClawHubSpecWithProgress(params: {
       progress.stop("Review ClawHub warning");
       renderTrustWarning(failureWarning);
     }
-    if (result.ok) {
-      progress.stop(formatPluginInstalled(safeLabel));
-    } else {
-      progress.stop(formatPluginInstallFailed(safeLabel));
-    }
+    progress.stop(
+      t(result.ok ? "wizard.plugins.installedPlugin" : "wizard.plugins.installFailedShort", {
+        plugin: safeLabel,
+      }),
+    );
     consent.rethrowCallbackError();
     return { result, capabilityConsent };
   } catch (error) {
-    progress.stop(formatPluginInstallFailed(safeLabel));
+    progress.stop(t("wizard.plugins.installFailedShort", { plugin: safeLabel }));
     consent.rethrowCallbackError();
     // The separate ClawHub risk prompt also owns wizard navigation.
     if (error instanceof WizardCancelledError || error instanceof WizardNavigationError) {
@@ -1062,7 +1007,6 @@ export async function ensureOnboardingPluginInstalled(params: {
   workspaceDir?: string;
   promptInstall?: boolean;
   autoConfirmSingleSource?: boolean;
-  reviewOfficialArtifacts?: boolean;
   beforePersistentEffect?: () => void | Promise<void>;
   onCapabilityConsent?: PluginCapabilityConsentHandler;
 }): Promise<OnboardingPluginInstallResult> {
@@ -1083,7 +1027,6 @@ export async function ensureOnboardingPluginInstalled(params: {
         prompter,
         runtime,
         onCapabilityConsent,
-        reviewOfficialArtifacts: params.reviewOfficialArtifacts,
         beforePersistentEffect: params.beforePersistentEffect,
       }),
     );
@@ -1148,11 +1091,11 @@ export async function ensureOnboardingPluginInstalled(params: {
   assertConfigWriteAllowedInCurrentMode();
 
   return await withPluginLifecycleLease({}, async () => {
-    if (choice === "local" && localPath) {
-      return await installLocalOnboardingPlugin({
+    const installLocal = (selectedPath: string) =>
+      installLocalOnboardingPlugin({
         cfg: next,
         entry,
-        localPath,
+        localPath: selectedPath,
         bundledLocalPath,
         npmSpec,
         workspaceDir,
@@ -1161,6 +1104,8 @@ export async function ensureOnboardingPluginInstalled(params: {
         onCapabilityConsent,
         beforePersistentEffect: params.beforePersistentEffect,
       });
+    if (choice === "local" && localPath) {
+      return await installLocal(localPath);
     }
 
     const sources = resolvePluginInstallSources(
@@ -1229,7 +1174,6 @@ export async function ensureOnboardingPluginInstalled(params: {
                     prompter,
                     runtime,
                     onCapabilityConsent,
-                    reviewOfficialArtifacts: params.reviewOfficialArtifacts,
                     beforePersistentEffect: params.beforePersistentEffect,
                   })),
                 }
@@ -1240,7 +1184,6 @@ export async function ensureOnboardingPluginInstalled(params: {
                   prompter,
                   runtime,
                   onCapabilityConsent,
-                  reviewOfficialArtifacts: params.reviewOfficialArtifacts,
                   beforePersistentEffect: params.beforePersistentEffect,
                 }),
           isRetryable: (attempt) =>
@@ -1309,18 +1252,7 @@ export async function ensureOnboardingPluginInstalled(params: {
         initialValue: true,
       });
       if (fallback) {
-        return await installLocalOnboardingPlugin({
-          cfg: next,
-          entry,
-          localPath,
-          bundledLocalPath,
-          npmSpec,
-          workspaceDir,
-          prompter,
-          runtime,
-          onCapabilityConsent,
-          beforePersistentEffect: params.beforePersistentEffect,
-        });
+        return await installLocal(localPath);
       }
     }
     runtime.error?.(`Plugin install failed: ${summarizeInstallError(result.error)}`);

@@ -123,6 +123,24 @@ describe("resolveApplicationStartupSettings", () => {
 describe("loadSettings default gateway URL derivation", () => {
   installSettingsStorageLifecycle();
 
+  it("keeps development credentials scoped to the upstream when the Vite target changes", () => {
+    setTestLocation({ protocol: "http:", host: "localhost:5173", pathname: "/" });
+    const first = "ws://localhost:18789";
+    const second = "ws://localhost:18790";
+    saveSettings(makeUiSettings(first));
+    persistSessionToken(first, "first-credential");
+    vi.stubGlobal("OPENCLAW_UI_DEV_GATEWAY", { gatewayUrl: second, proxyPath: "/dev-second" });
+    expect(loadSettings()).toMatchObject({ gatewayUrl: second, token: "" });
+    persistSessionToken(second, "second-credential");
+    expect(loadSettings()).toMatchObject({ gatewayUrl: second, token: "second-credential" });
+    expect(resolvePageGatewaySettings(makeUiSettings(first))).toMatchObject({
+      gatewayUrl: second,
+      token: "second-credential",
+    });
+    vi.stubGlobal("OPENCLAW_UI_DEV_GATEWAY", { gatewayUrl: first, proxyPath: "/dev-first" });
+    expect(loadSettings()).toMatchObject({ gatewayUrl: first, token: "first-credential" });
+  });
+
   it("keeps IPv6 dev-page default gateway hosts dialable", () => {
     setTestLocation({ protocol: "http:", host: "[::1]:5173", pathname: "/" });
     // A vite client script marks the page as dev, which reroutes the default
@@ -258,21 +276,9 @@ describe("loadSettings default gateway URL derivation", () => {
     });
 
     const gwUrl = expectedGatewayUrl("");
-    saveSettings({
-      gatewayUrl: gwUrl,
-      token: "session-token",
-      sessionKey: "main",
-      lastActiveSessionKey: "main",
-      theme: "claw",
-      themeMode: "system",
-      chatShowThinking: true,
-      chatShowToolCalls: true,
-      navCollapsed: false,
-      navWidth: 258,
-      sidebarEntries: [],
-      textScale: 100,
-    });
+    saveSettings(makeUiSettings(gwUrl, { token: "session-token", textScale: 100 }));
 
+    persistSessionToken(gwUrl, "session-token");
     const settings = loadSettings();
     expect(settings.gatewayUrl).toBe(gwUrl);
     expect(settings.token).toBe("session-token");
@@ -287,34 +293,10 @@ describe("loadSettings default gateway URL derivation", () => {
 
     const gwUrl = expectedGatewayUrl("");
     const otherUrl = "wss://other-gateway.example:8443";
-    saveSettings({
-      gatewayUrl: gwUrl,
-      token: "gateway-a-token",
-      sessionKey: "main",
-      lastActiveSessionKey: "main",
-      theme: "claw",
-      themeMode: "system",
-      chatShowThinking: true,
-      chatShowToolCalls: true,
-      navCollapsed: false,
-      navWidth: 258,
-      sidebarEntries: [],
-    });
+    saveSettings(makeUiSettings(gwUrl, { token: "gateway-a-token" }));
+    saveSettings(makeUiSettings(otherUrl));
 
-    saveSettings({
-      gatewayUrl: otherUrl,
-      token: "",
-      sessionKey: "main",
-      lastActiveSessionKey: "main",
-      theme: "claw",
-      themeMode: "system",
-      chatShowThinking: true,
-      chatShowToolCalls: true,
-      navCollapsed: false,
-      navWidth: 258,
-      sidebarEntries: [],
-    });
-
+    persistSessionToken(gwUrl, "gateway-a-token");
     const settings = loadSettings();
     expect(settings.gatewayUrl).toBe(gwUrl);
     expect(settings.token).toBe("gateway-a-token");
@@ -328,22 +310,10 @@ describe("loadSettings default gateway URL derivation", () => {
     });
 
     const gwUrl = expectedGatewayUrl("");
-    saveSettings({
-      gatewayUrl: gwUrl,
-      token: "memory-only-token",
-      sessionKey: "main",
-      lastActiveSessionKey: "main",
-      theme: "claw",
-      themeMode: "system",
-      chatShowThinking: true,
-      chatShowToolCalls: true,
-      navCollapsed: false,
-      navWidth: 258,
-      sidebarEntries: [],
-    });
+    saveSettings(makeUiSettings(gwUrl, { token: "memory-only-token" }));
     const settings = loadSettings();
     expect(settings.gatewayUrl).toBe(gwUrl);
-    expect(settings.token).toBe("memory-only-token");
+    expect(settings.token).toBe("");
 
     const scopedKey = `openclaw.control.settings.v1:${gwUrl}`;
     expect(JSON.parse(localStorage.getItem(scopedKey) ?? "{}")).toEqual({
@@ -354,6 +324,7 @@ describe("loadSettings default gateway URL derivation", () => {
       chatShowToolCalls: true,
       chatPersistCommentary: true,
       navWidth: 258,
+      sidebarAgentsMode: "chip",
       sidebarEntries: [],
       sessionsByGateway: {
         [gwUrl]: {
@@ -362,44 +333,15 @@ describe("loadSettings default gateway URL derivation", () => {
         },
       },
     });
-    expect(sessionStorage.length).toBe(1);
+    expect(sessionStorage.length).toBe(0);
   });
 
-  it("clears the current-tab token when saving an empty token", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
-
+  it("clears the current-tab token explicitly", () => {
+    setTestLocation({ protocol: "https:", host: "gateway.example:8443", pathname: "/" });
     const gwUrl = expectedGatewayUrl("");
-    saveSettings({
-      gatewayUrl: gwUrl,
-      token: "stale-token",
-      sessionKey: "main",
-      lastActiveSessionKey: "main",
-      theme: "claw",
-      themeMode: "system",
-      chatShowThinking: true,
-      chatShowToolCalls: true,
-      navCollapsed: false,
-      navWidth: 258,
-      sidebarEntries: [],
-    });
-    saveSettings({
-      gatewayUrl: gwUrl,
-      token: "",
-      sessionKey: "main",
-      lastActiveSessionKey: "main",
-      theme: "claw",
-      themeMode: "system",
-      chatShowThinking: true,
-      chatShowToolCalls: true,
-      navCollapsed: false,
-      navWidth: 258,
-      sidebarEntries: [],
-    });
-
+    persistSessionToken(gwUrl, "stale-token");
+    expect(loadSettings().token).toBe("stale-token");
+    persistSessionToken(gwUrl, "");
     expect(loadSettings().token).toBe("");
     expect(sessionStorage.length).toBe(0);
   });
@@ -412,20 +354,13 @@ describe("loadSettings default gateway URL derivation", () => {
     });
 
     const gwUrl = expectedGatewayUrl("");
-    saveSettings({
-      gatewayUrl: gwUrl,
-      token: "",
-      sessionKey: "agent:test_old:main",
-      lastActiveSessionKey: "agent:test_old:main",
-      selectedAgentId: " OpenClaw ",
-      theme: "claw",
-      themeMode: "system",
-      chatShowThinking: true,
-      chatShowToolCalls: true,
-      navCollapsed: false,
-      navWidth: 258,
-      sidebarEntries: [],
-    });
+    saveSettings(
+      makeUiSettings(gwUrl, {
+        sessionKey: "agent:test_old:main",
+        lastActiveSessionKey: "agent:test_old:main",
+        selectedAgentId: " OpenClaw ",
+      }),
+    );
 
     const settings = loadSettings();
     expect(settings.gatewayUrl).toBe(gwUrl);
@@ -460,19 +395,12 @@ describe("loadSettings default gateway URL derivation", () => {
     }
     localStorage.setItem(scopedKey, JSON.stringify({ sessionsByGateway: staleEntries }));
 
-    saveSettings({
-      gatewayUrl: gwUrl,
-      token: "",
-      sessionKey: "agent:current:main",
-      lastActiveSessionKey: "agent:current:main",
-      theme: "claw",
-      themeMode: "system",
-      chatShowThinking: true,
-      chatShowToolCalls: true,
-      navCollapsed: false,
-      navWidth: 258,
-      sidebarEntries: [],
-    });
+    saveSettings(
+      makeUiSettings(gwUrl, {
+        sessionKey: "agent:current:main",
+        lastActiveSessionKey: "agent:current:main",
+      }),
+    );
 
     const persisted = JSON.parse(localStorage.getItem(scopedKey) ?? "{}");
 

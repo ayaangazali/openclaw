@@ -6,18 +6,18 @@ import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/s
 import { getAiTransportHost } from "../host.js";
 import type { AnthropicContextManagementOptions } from "../provider-options.js";
 import { isAnthropicOAuthApiKey } from "../providers/anthropic-auth-headers.js";
-import { ANTHROPIC_CLAUDE_CODE_BILLING_SYSTEM_BLOCK } from "../providers/anthropic-model-contract.js";
+import { ANTHROPIC_CLAUDE_CODE_VERSION } from "../providers/anthropic-model-contract.js";
+import {
+  ANTHROPIC_SERVER_SIDE_FALLBACK_BETA,
+  ANTHROPIC_SERVER_SIDE_FALLBACKS,
+} from "../providers/anthropic-server-fallback.js";
 import { resolveCacheRetention } from "../providers/cache-retention.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import {
   splitSystemPromptCacheBoundary,
   stripSystemPromptCacheBoundary,
+  stripSystemPromptRelocatableBoundary,
 } from "../utils/system-prompt-cache-boundary.js";
-/**
- * Anthropic-family request payload policy helpers.
- * Applies service-tier and cache-control markers only when provider endpoint
- * capabilities allow them.
- */
 import { resolveProviderEndpoint, resolveProviderRequestCapabilities } from "./host-policy.js";
 import { parsePositiveInteger } from "./transport-utils.js";
 
@@ -67,12 +67,7 @@ function resolveAnthropicCompactThreshold(contextWindow: unknown, configured: un
     return Math.max(ANTHROPIC_COMPACT_THRESHOLD_MIN, configuredThreshold);
   }
   const resolvedContextWindow = parsePositiveInteger(contextWindow);
-  return Math.max(
-    ANTHROPIC_COMPACT_THRESHOLD_MIN,
-    resolvedContextWindow === undefined
-      ? ANTHROPIC_COMPACT_THRESHOLD_MIN
-      : Math.floor(resolvedContextWindow * 0.7),
-  );
+  return Math.max(ANTHROPIC_COMPACT_THRESHOLD_MIN, Math.floor((resolvedContextWindow ?? 0) * 0.7));
 }
 
 /** Resolve the server-compaction gate and effective threshold for an Anthropic route. */
@@ -131,11 +126,7 @@ export function isAnthropicServerToolClearingEnabled(
 }
 
 function resolveBaseUrlHostname(baseUrl: string): string | undefined {
-  try {
-    return new URL(baseUrl).hostname;
-  } catch {
-    return undefined;
-  }
+  return URL.parse(baseUrl)?.hostname;
 }
 
 function isLongTtlEligibleEndpoint(baseUrl: string | undefined): boolean {
@@ -173,7 +164,6 @@ export function resolveAnthropicEphemeralCacheControl(
   return { type: "ephemeral", ...(ttl ? { ttl } : {}) };
 }
 
-/** Resolve the same cache capabilities and TTL for both Messages entry points. */
 export function resolveAnthropicCacheOptions(
   model: Model<"anthropic-messages">,
   cacheRetention?: "short" | "long" | "none",
@@ -195,6 +185,7 @@ export function buildAnthropicSystemBlocks(
   systemPrompt: string | undefined,
   isOAuthToken: boolean,
   cacheControl: AnthropicEphemeralCacheControl | undefined,
+  claudeCodeVersion = ANTHROPIC_CLAUDE_CODE_VERSION,
 ): TextBlockParam[] | undefined {
   const blocks: TextBlockParam[] = systemPrompt
     ? [{ type: "text", text: sanitizeSurrogates(systemPrompt) }]
@@ -213,7 +204,10 @@ export function buildAnthropicSystemBlocks(
       ? undefined
       : cacheControl;
     blocks.unshift(
-      { type: "text", text: ANTHROPIC_CLAUDE_CODE_BILLING_SYSTEM_BLOCK },
+      {
+        type: "text",
+        text: `x-anthropic-billing-header: cc_version=${claudeCodeVersion}; cc_entrypoint=sdk-cli;`,
+      },
       {
         type: "text",
         text: "You are Claude Code, Anthropic's official CLI for Claude.",
@@ -266,11 +260,16 @@ function applyAnthropicCacheControlToSystem(
       continue;
     }
     const record = block as Record<string, unknown>;
-    if (record.type !== "text" || typeof record.text !== "string") {
+    const blockText = record.text;
+    if (record.type !== "text" || typeof blockText !== "string") {
       normalizedBlocks.push(block);
       continue;
     }
-    const split = splitSystemPromptCacheBoundary(record.text);
+    // This transport relocates nothing, so the relocatable marker must not
+    // survive into the payload; the cache boundary stays for the breakpoint.
+    const text = stripSystemPromptRelocatableBoundary(blockText);
+    record.text = text;
+    const split = splitSystemPromptCacheBoundary(text);
     if (!split) {
       if (record.cache_control === undefined) {
         record.cache_control = cacheControl;
@@ -565,20 +564,24 @@ export function applyAnthropicContextManagementToRequest(
   );
 }
 
-export function resolveAnthropicContextManagementBetaHeader(
-  payload: AnthropicContextManagementPayload,
+export function resolveAnthropicRequestBetaHeader(
+  payload: AnthropicContextManagementPayload & { fallbacks?: unknown },
   directApiKeyBetaHeader: string | undefined,
 ): string | undefined {
-  if (directApiKeyBetaHeader === undefined || !isRecord(payload.context_management)) {
+  if (directApiKeyBetaHeader === undefined) {
     return directApiKeyBetaHeader;
   }
-  const edits = payload.context_management.edits;
+  const edits = isRecord(payload.context_management) ? payload.context_management.edits : undefined;
   const betas = new Set(
     directApiKeyBetaHeader
       .split(",")
       .map((beta) => beta.trim())
       .filter(Boolean),
   );
+  // Payload-required betas must survive model and per-request header overrides.
+  if (payload.fallbacks === ANTHROPIC_SERVER_SIDE_FALLBACKS) {
+    betas.add(ANTHROPIC_SERVER_SIDE_FALLBACK_BETA);
+  }
   for (const edit of Array.isArray(edits) ? edits : []) {
     if (!isRecord(edit)) {
       continue;

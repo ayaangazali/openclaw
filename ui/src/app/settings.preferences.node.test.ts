@@ -2,11 +2,12 @@
 // Browser-local preference persistence: chat, talk, theme, text scale, and the
 // local user identity. Split from settings.node.test.ts to keep each file under
 // the lint size budget.
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createImportedCustomThemeFixture } from "../test-helpers/custom-theme.ts";
 import {
   expectedGatewayUrl,
   installSettingsStorageLifecycle,
+  makeUiSettings,
   setTestLocation,
 } from "../test-helpers/settings-node.ts";
 import { createApplicationTheme } from "./bootstrap-theme.ts";
@@ -22,12 +23,42 @@ import {
   persistSessionToken,
   loadSettings,
   loadUiPreferences,
-  normalizeChatMessageMaxWidth,
   saveSettings,
 } from "./settings.ts";
 
 describe("settings preference persistence", () => {
   installSettingsStorageLifecycle();
+  beforeEach(() => {
+    setTestLocation({ protocol: "https:", host: "gateway.example:8443", pathname: "/" });
+  });
+
+  it("preserves an older browser-panel preference through external opt-in, reload, and opt-out", () => {
+    setTestLocation({ protocol: "https:", host: "gateway.example", pathname: "/" });
+    const gatewayUrl = "wss://gateway.example";
+    const storageKey = "openclaw.control.settings.v1:" + gatewayUrl;
+    // Pre-change browser settings have no external-link field.
+    localStorage.setItem(
+      storageKey,
+      JSON.stringify({
+        gatewayUrl,
+        openLinksInControlUiBrowser: true,
+        navWidth: 312,
+      }),
+    );
+    expect(loadSettings().openLinksExternally).not.toBe(true);
+    for (const enabled of [true, false]) {
+      patchSettings({ openLinksExternally: enabled });
+      const reloaded = loadUiPreferences(gatewayUrl);
+      expect(reloaded.openLinksExternally === true).toBe(enabled);
+      expect(reloaded.openLinksInControlUiBrowser).toBe(true);
+      expect(reloaded.navWidth).toBe(312);
+      expect(JSON.parse(localStorage.getItem(storageKey)!)).toMatchObject({
+        openLinksInControlUiBrowser: true,
+        navWidth: 312,
+      });
+    }
+    expect(loadUiPreferences("wss://other.example").openLinksExternally).not.toBe(true);
+  });
 
   it.each([false, true])(
     "keeps the live connection URL when a same-scope spelling was persisted (private storage: %s)",
@@ -50,7 +81,7 @@ describe("settings preference persistence", () => {
     },
   );
 
-  it("keeps live preferences scoped through cross-tab edits, gateway switches, and credential rotation", () => {
+  it("keeps live preferences scoped through cross-tab edits, gateway switches, and credential rotation", async () => {
     setTestLocation({ protocol: "https:", host: "gateway-a.example", pathname: "/" });
     const events = new EventTarget();
     vi.stubGlobal("addEventListener", events.addEventListener.bind(events));
@@ -127,6 +158,7 @@ describe("settings preference persistence", () => {
       resetServerUiPrefsSync();
       theme.dispose();
       gateway.stop();
+      await vi.dynamicImportSettled();
     }
   });
 
@@ -156,22 +188,10 @@ describe("settings preference persistence", () => {
   });
 
   it("defaults the chat send shortcut to enter", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
-
     expect(loadSettings().chatSendShortcut).toBe("enter");
   });
 
   it("persists only the non-default chat send shortcut", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
-
     const gwUrl = expectedGatewayUrl("");
     const scopedKey = `openclaw.control.settings.v1:${gwUrl}`;
     saveSettings({ ...loadSettings(), chatSendShortcut: "modifier-enter" });
@@ -193,12 +213,6 @@ describe("settings preference persistence", () => {
   });
 
   it("persists only explicit chat follow-up overrides", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
-
     const gwUrl = expectedGatewayUrl("");
     const scopedKey = `openclaw.control.settings.v1:${gwUrl}`;
     expect(loadSettings().chatFollowUpMode).toBeUndefined();
@@ -221,40 +235,27 @@ describe("settings preference persistence", () => {
     expect(loadSettings().chatFollowUpMode).toBeUndefined();
   });
 
-  it("defaults task progress auto-collapse off and persists only the opt-in", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
-
+  it.each([
+    { key: "chatShowTaskProgress", defaultValue: true },
+    { key: "chatCollapseTaskProgress", defaultValue: false },
+  ] as const)("persists only the non-default $key preference", ({ key, defaultValue }) => {
     const gwUrl = expectedGatewayUrl("");
     const scopedKey = `openclaw.control.settings.v1:${gwUrl}`;
-    expect(loadSettings().chatCollapseTaskProgress).toBe(false);
+    expect(loadSettings()[key]).toBe(defaultValue);
 
-    saveSettings({ ...loadSettings(), chatCollapseTaskProgress: true });
-    expect(JSON.parse(localStorage.getItem(scopedKey) ?? "{}").chatCollapseTaskProgress).toBe(true);
-    expect(loadSettings().chatCollapseTaskProgress).toBe(true);
+    saveSettings({ ...loadSettings(), [key]: !defaultValue });
+    expect(JSON.parse(localStorage.getItem(scopedKey) ?? "{}")[key]).toBe(!defaultValue);
+    expect(loadSettings()[key]).toBe(!defaultValue);
 
-    saveSettings({ ...loadSettings(), chatCollapseTaskProgress: false });
-    expect(JSON.parse(localStorage.getItem(scopedKey) ?? "{}")).not.toHaveProperty(
-      "chatCollapseTaskProgress",
-    );
+    saveSettings({ ...loadSettings(), [key]: defaultValue });
+    expect(JSON.parse(localStorage.getItem(scopedKey) ?? "{}")).not.toHaveProperty(key);
+    expect(loadSettings()[key]).toBe(defaultValue);
 
-    localStorage.setItem(
-      scopedKey,
-      JSON.stringify({ gatewayUrl: gwUrl, chatCollapseTaskProgress: "yes" }),
-    );
-    expect(loadSettings().chatCollapseTaskProgress).toBe(false);
+    localStorage.setItem(scopedKey, JSON.stringify({ gatewayUrl: gwUrl, [key]: "yes" }));
+    expect(loadSettings()[key]).toBe(defaultValue);
   });
 
   it("persists only the non-default catalog open target", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
-
     const gwUrl = expectedGatewayUrl("");
     const scopedKey = `openclaw.control.settings.v1:${gwUrl}`;
     expect(loadSettings().catalogOpenTarget).toBe("viewer");
@@ -274,27 +275,8 @@ describe("settings preference persistence", () => {
   });
 
   it("persists pinned agents and drops malformed or duplicate entries", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
-
     const gwUrl = expectedGatewayUrl("");
-    saveSettings({
-      gatewayUrl: gwUrl,
-      token: "",
-      sessionKey: "main",
-      lastActiveSessionKey: "main",
-      theme: "claw",
-      themeMode: "system",
-      chatShowThinking: true,
-      chatShowToolCalls: true,
-      navCollapsed: false,
-      navWidth: 258,
-      sidebarEntries: [],
-      pinnedAgentIds: ["main", "research"],
-    });
+    saveSettings(makeUiSettings(gwUrl, { pinnedAgentIds: ["main", "research"] }));
     expect(loadSettings().pinnedAgentIds).toEqual(["main", "research"]);
 
     const scopedKey = `openclaw.control.settings.v1:${gwUrl}`;
@@ -308,12 +290,6 @@ describe("settings preference persistence", () => {
   });
 
   it("defaults live sidebar activity on and persists only an explicit opt-out", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
-
     const gwUrl = expectedGatewayUrl("");
     const scopedKey = `openclaw.control.settings.v1:${gwUrl}`;
     expect(loadSettings().sidebarLiveActivity).toBe(true);
@@ -329,7 +305,6 @@ describe("settings preference persistence", () => {
   });
 
   it("defaults advanced settings off and persists only an explicit opt-in", () => {
-    setTestLocation({ protocol: "https:", host: "gateway.example:8443", pathname: "/" });
     const gwUrl = expectedGatewayUrl("");
     const scopedKey = `openclaw.control.settings.v1:${gwUrl}`;
 
@@ -344,33 +319,7 @@ describe("settings preference persistence", () => {
     );
   });
 
-  it("normalizes and persists browser-local chat message width", () => {
-    setTestLocation({ protocol: "https:", host: "gateway.example:8443", pathname: "/" });
-    const gwUrl = expectedGatewayUrl("");
-    const scopedKey = `openclaw.control.settings.v1:${gwUrl}`;
-
-    expect(normalizeChatMessageMaxWidth("  min(1280px,   82%)  ")).toBe("min(1280px, 82%)");
-    expect(normalizeChatMessageMaxWidth("960px; color: red")).toBeUndefined();
-
-    saveSettings({ ...loadSettings(), chatMessageMaxWidth: "  min(1280px,   82%)  " });
-    expect(JSON.parse(localStorage.getItem(scopedKey) ?? "{}").chatMessageMaxWidth).toBe(
-      "min(1280px, 82%)",
-    );
-    expect(loadSettings().chatMessageMaxWidth).toBe("min(1280px, 82%)");
-
-    saveSettings({ ...loadSettings(), chatMessageMaxWidth: undefined });
-    expect(JSON.parse(localStorage.getItem(scopedKey) ?? "{}")).not.toHaveProperty(
-      "chatMessageMaxWidth",
-    );
-  });
-
   it("keeps the last written settings in memory when persistence fails", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
-
     const setItem = vi.spyOn(localStorage, "setItem").mockImplementation(() => {
       throw new DOMException("blocked", "SecurityError");
     });
@@ -396,12 +345,6 @@ describe("settings preference persistence", () => {
   });
 
   it("persists only a normalized realtime Talk microphone id", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
-
     const gwUrl = expectedGatewayUrl("");
     const scopedKey = `openclaw.control.settings.v1:${gwUrl}`;
     saveSettings({ ...loadSettings(), realtimeTalkInputDeviceId: " usb-mic " });
@@ -417,12 +360,6 @@ describe("settings preference persistence", () => {
   });
 
   it("persists only a normalized realtime Talk camera id", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
-
     const gwUrl = expectedGatewayUrl("");
     const scopedKey = `openclaw.control.settings.v1:${gwUrl}`;
     saveSettings({ ...loadSettings(), realtimeTalkVideoDeviceId: " back-camera " });
@@ -438,12 +375,6 @@ describe("settings preference persistence", () => {
   });
 
   it("defaults composer hold-to-record on and persists only the opt-out", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
-
     const gwUrl = expectedGatewayUrl("");
     const scopedKey = `openclaw.control.settings.v1:${gwUrl}`;
     expect(loadSettings().composerHoldToRecord).toBe(true);
@@ -460,12 +391,6 @@ describe("settings preference persistence", () => {
   });
 
   it("normalizes and persists the device-local talk camera preference", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
-
     const gwUrl = expectedGatewayUrl("");
     const scopedKey = `openclaw.control.settings.v1:${gwUrl}`;
     expect(loadSettings().talkCameraAutoEnable).toBeUndefined();
@@ -486,26 +411,8 @@ describe("settings preference persistence", () => {
   });
 
   it("persists themeMode and navWidth alongside the selected theme", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
-
     const gwUrl = expectedGatewayUrl("");
-    saveSettings({
-      gatewayUrl: gwUrl,
-      token: "",
-      sessionKey: "main",
-      lastActiveSessionKey: "main",
-      theme: "dash",
-      themeMode: "light",
-      chatShowThinking: true,
-      chatShowToolCalls: true,
-      navCollapsed: false,
-      navWidth: 320,
-      sidebarEntries: [],
-    });
+    saveSettings(makeUiSettings(gwUrl, { theme: "dash", themeMode: "light", navWidth: 320 }));
 
     const scopedKey = `openclaw.control.settings.v1:${gwUrl}`;
     const persisted = JSON.parse(localStorage.getItem(scopedKey) ?? "{}") as Record<
@@ -518,12 +425,6 @@ describe("settings preference persistence", () => {
   });
 
   it("normalizes persisted text scale to the nearest supported stop", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
-
     const gwUrl = expectedGatewayUrl("");
     localStorage.setItem(
       `openclaw.control.settings.v1:${gwUrl}`,
@@ -539,7 +440,6 @@ describe("settings preference persistence", () => {
   it.each(["fontUi", "fontChat"] as const)(
     "persists only explicit, supported %s overrides",
     (key) => {
-      setTestLocation({ protocol: "https:", host: "gateway.example:8443", pathname: "/" });
       const defaults = loadSettings();
       const scopedKey = `openclaw.control.settings.v1:${defaults.gatewayUrl}`;
       expect(defaults[key]).toBeUndefined();
@@ -566,11 +466,6 @@ describe("settings preference persistence", () => {
   );
 
   it("omits the inherited text scale and removes an authored override on reset", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
     const defaults = loadSettings();
     const scopedKey = `openclaw.control.settings.v1:${defaults.gatewayUrl}`;
     expect(defaults.textScale).toBeUndefined();
@@ -586,11 +481,6 @@ describe("settings preference persistence", () => {
   });
 
   it("treats the legacy always-persisted default text scale as inherited", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
     const gatewayUrl = expectedGatewayUrl("");
     const scopedKey = `openclaw.control.settings.v1:${gatewayUrl}`;
     localStorage.setItem(scopedKey, JSON.stringify({ gatewayUrl, textScale: 100 }));
@@ -601,28 +491,9 @@ describe("settings preference persistence", () => {
   });
 
   it("persists the browser-local custom theme payload when present", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
-
     const gwUrl = expectedGatewayUrl("");
     const customTheme = createImportedCustomThemeFixture();
-    saveSettings({
-      gatewayUrl: gwUrl,
-      token: "",
-      sessionKey: "main",
-      lastActiveSessionKey: "main",
-      theme: "custom",
-      themeMode: "system",
-      chatShowThinking: true,
-      chatShowToolCalls: true,
-      navCollapsed: false,
-      navWidth: 258,
-      sidebarEntries: [],
-      customTheme,
-    });
+    saveSettings(makeUiSettings(gwUrl, { theme: "custom", customTheme }));
 
     const settings = loadSettings();
     expect(settings.theme).toBe("custom");
@@ -631,12 +502,6 @@ describe("settings preference persistence", () => {
   });
 
   it("falls back to claw when persisted custom theme data is invalid", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
-
     const gwUrl = expectedGatewayUrl("");
     localStorage.setItem(
       `openclaw.control.settings.v1:${gwUrl}`,
@@ -672,11 +537,6 @@ describe("settings preference persistence", () => {
   });
 
   it("loads local user identity separately from gateway settings", () => {
-    setTestLocation({
-      protocol: "https:",
-      host: "gateway.example:8443",
-      pathname: "/",
-    });
     localStorage.setItem(
       "openclaw.control.user.v1",
       JSON.stringify({ name: "Buns", avatar: "🦞" }),

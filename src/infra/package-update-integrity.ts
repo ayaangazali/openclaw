@@ -6,48 +6,148 @@ import { createSubsystemLogger } from "../logging/subsystem.js";
 import { ABSOLUTE_DEADLINE_EXPIRED, awaitWithinDeadline } from "../utils/absolute-deadline.js";
 import { hasErrnoCode } from "./errors.js";
 import { readPackageVersion } from "./package-json.js";
+import { UPDATE_RUNNER_TIMEOUT_MS } from "./update-run-timeouts.js";
 
 const MAX_TREE_BYTES = 1024 * 1024 * 1024;
 const MAX_TREE_ENTRIES = 50_000;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const MAX_LAUNCHER_BYTES = 1024 * 1024;
-const MAX_SCAN_MS = 30_000;
 const log = createSubsystemLogger("update/package-integrity");
 let readerSequence = 0;
 
-type PackageIntegrityFingerprint = { digest: string; identity: string; version: string };
+export type PackageIntegrityFingerprint = { digest: string; identity: string; version: string };
+export type PackageDirectoryIdentity = Pick<PackageIntegrityFingerprint, "identity" | "version">;
+
+type EntryObservation = { fields: Map<string, string>; retained: string };
+// Diagnostics live only as long as the in-process baseline; journal fingerprints stay compact.
+const observations = new WeakMap<PackageIntegrityFingerprint, Map<string, EntryObservation>>();
+
+export class PackageIntegrityMismatchError extends Error {
+  constructor(
+    message: string,
+    readonly differences: string[],
+  ) {
+    super(`${message}${differences.length ? ` Drift: ${differences.join("; ")}.` : ""}`);
+  }
+}
+
+export function packageIntegrityDifferences(
+  expected: PackageIntegrityFingerprint,
+  actual: PackageIntegrityFingerprint,
+): string[] {
+  const before = observations.get(expected);
+  const after = observations.get(actual);
+  const differences: string[] = [];
+  if (before && after) {
+    for (const name of new Set([...before.keys(), ...after.keys()])) {
+      const left = before.get(name);
+      const right = after.get(name);
+      if (left?.retained === right?.retained) {
+        continue;
+      }
+      const fields = !left
+        ? ["added"]
+        : !right
+          ? ["removed"]
+          : [...new Set([...left.fields.keys(), ...right.fields.keys()])].filter(
+              (field) => left.fields.get(field) !== right.fields.get(field),
+            );
+      const entry = name.length > 90 ? `${name.slice(0, 87)}...` : name || ".";
+      differences.push(
+        `Package rollback entry ${JSON.stringify(entry)}: fields=${fields.join(",")}`,
+      );
+      if (differences.length === 5) {
+        break;
+      }
+    }
+  }
+  return differences;
+}
+
+export type PackageLauncherFingerprint = {
+  type: "symlink" | "file";
+  mode: string;
+  uid: string;
+  gid: string;
+  contents: string;
+};
+
+export function packageLauncherDifferences(
+  expected: PackageLauncherFingerprint,
+  actual: PackageLauncherFingerprint,
+  ownershipPreserved = true,
+): string[] {
+  const symlink = expected.type === "symlink" && actual.type === "symlink";
+  return (["type", "mode", "uid", "gid", "contents"] as const)
+    .filter(
+      (field) =>
+        !(
+          symlink &&
+          (field === "mode" || (!ownershipPreserved && (field === "uid" || field === "gid")))
+        ) && expected[field] !== actual[field],
+    )
+    .map((field) => (field === "contents" && symlink ? "target" : field));
+}
+
+export class PackageIntegrityTimeoutError extends Error {
+  constructor(readonly budgetMs: number) {
+    super("Package rollback verification timed out");
+  }
+}
+
+/** Resource exhaustion is distinct from a filesystem-integrity failure. */
+export class PackageIntegrityLimitError extends Error {
+  constructor(readonly resource: "entry" | "byte") {
+    super(`Package rollback verification ${resource} limit exceeded`);
+  }
+}
+
+export function isPackageIntegrityResourceError(
+  error: unknown,
+): error is PackageIntegrityTimeoutError | PackageIntegrityLimitError {
+  return (
+    error instanceof PackageIntegrityTimeoutError || error instanceof PackageIntegrityLimitError
+  );
+}
 
 export type PackageRootIntegrityFingerprint =
   | { kind: "directory"; tree: PackageIntegrityFingerprint }
   | { kind: "link"; metadata: string[]; target: string };
 
+export async function readPackageVersionIfPresent(
+  packageRoot: string | null,
+): Promise<string | null> {
+  return packageRoot ? readPackageVersion(packageRoot) : null;
+}
+
 function identity(stat: BigIntStats): string {
   return `${stat.dev}:${stat.ino}`;
 }
 
-function metadata(stat: BigIntStats): string[] {
-  return [
-    identity(stat),
-    stat.mode.toString(),
-    stat.uid.toString(),
-    stat.gid.toString(),
-    stat.nlink.toString(),
-    stat.size.toString(),
-    stat.mtimeNs.toString(),
-    stat.ctimeNs.toString(),
-  ];
+function metadata(stat: BigIntStats) {
+  return {
+    "dev:ino": identity(stat),
+    mode: stat.mode.toString(),
+    uid: stat.uid.toString(),
+    gid: stat.gid.toString(),
+    nlink: stat.nlink.toString(),
+    size: stat.size.toString(),
+    mtimeNs: stat.mtimeNs.toString(),
+    ctimeNs: stat.ctimeNs.toString(),
+  };
 }
 
 function unchanged(left: BigIntStats, right: BigIntStats): boolean {
-  return left.ino !== 0n && metadata(left).join("/") === metadata(right).join("/");
+  return (
+    left.ino !== 0n &&
+    Object.values(metadata(left)).join("/") === Object.values(metadata(right)).join("/")
+  );
 }
 
 /** Read-only, bounded observations. These do not exclude writers or seal an inode. */
-export function createPackageIntegrityReader(timeoutMs = MAX_SCAN_MS) {
+export function createPackageIntegrityReader(timeoutMs = UPDATE_RUNNER_TIMEOUT_MS) {
   const startedAtMonotonicMs = performance.now();
-  const budget = Number.isFinite(timeoutMs)
-    ? Math.min(MAX_SCAN_MS, Math.max(1, timeoutMs))
-    : MAX_SCAN_MS;
+  const budget = Number.isFinite(timeoutMs) ? Math.max(1, timeoutMs) : UPDATE_RUNNER_TIMEOUT_MS;
   const deadline = Date.now() + budget;
   const timing = {
     readerId: `${process.pid}:${++readerSequence}`,
@@ -70,7 +170,7 @@ export function createPackageIntegrityReader(timeoutMs = MAX_SCAN_MS) {
   }
 
   async function observe<T>(
-    phase: "baseline" | "retained" | "restored",
+    phase: "baseline" | "retained" | "restored" | "transaction",
     operation: () => Promise<T>,
   ): Promise<T> {
     const emit = (event: string, facts?: Record<string, unknown>) => {
@@ -115,7 +215,7 @@ export function createPackageIntegrityReader(timeoutMs = MAX_SCAN_MS) {
           )
           .catch(() => {});
       }
-      throw new Error("Package rollback verification timed out");
+      throw new PackageIntegrityTimeoutError(budget);
     }
     return value;
   }
@@ -140,7 +240,7 @@ export function createPackageIntegrityReader(timeoutMs = MAX_SCAN_MS) {
           break;
         }
         if (children.length >= limit) {
-          throw new Error("Package rollback verification entry limit exceeded");
+          throw new PackageIntegrityLimitError("entry");
         }
         children.push(child.name);
       }
@@ -151,8 +251,11 @@ export function createPackageIntegrityReader(timeoutMs = MAX_SCAN_MS) {
   }
 
   async function hashFile(file: string, stat: BigIntStats, remainingBytes: number) {
-    if (!stat.isFile() || stat.size > BigInt(remainingBytes)) {
+    if (!stat.isFile()) {
       throw new Error("Package rollback verification byte limit exceeded");
+    }
+    if (stat.size > BigInt(remainingBytes)) {
+      throw new PackageIntegrityLimitError("byte");
     }
     const handle = await read(
       () => fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK),
@@ -164,18 +267,17 @@ export function createPackageIntegrityReader(timeoutMs = MAX_SCAN_MS) {
       }
       const hash = createHash("sha256");
       const buffer = Buffer.allocUnsafe(64 * 1024);
+      const size = Number(stat.size);
       let position = 0;
-      while (true) {
+      // The final stat detects growth; an extra EOF read costs one OS call per file.
+      while (position < size) {
         const { bytesRead } = await read(() =>
-          handle.read(buffer, 0, Math.min(buffer.length, remainingBytes - position + 1), position),
+          handle.read(buffer, 0, Math.min(buffer.length, size - position), position),
         );
         if (bytesRead === 0) {
-          break;
+          throw new Error("Package rollback file changed while reading");
         }
         position += bytesRead;
-        if (position > remainingBytes) {
-          throw new Error("Package rollback verification byte limit exceeded");
-        }
         hash.update(buffer.subarray(0, bytesRead));
       }
       if (!unchanged(stat, await read(() => handle.stat({ bigint: true })))) {
@@ -190,7 +292,7 @@ export function createPackageIntegrityReader(timeoutMs = MAX_SCAN_MS) {
   async function tree(root: string, originalRoot = root): Promise<PackageIntegrityFingerprint> {
     const digest = createHash("sha256");
     const observed: Array<{ file: string; stat: BigIntStats }> = [];
-    const hardlinks = new Map<string, string>();
+    const entriesObserved = new Map<string, EntryObservation>();
     let bytes = 0;
     let remainingEntries = MAX_TREE_ENTRIES - 1;
     let device: bigint | undefined;
@@ -209,13 +311,21 @@ export function createPackageIntegrityReader(timeoutMs = MAX_SCAN_MS) {
         rootIdentity = identity(stat);
       }
       observed.push({ file, stat });
-      // Renaming changes the root ctime. All descendant identities and clocks
-      // must survive; root identity is compared separately from this digest.
-      const fields = metadata(stat);
-      if (!relative) {
-        fields.pop();
+      // npm's disposable hidden lockfile is a cache, not package content:
+      // https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json#hidden-lockfiles
+      // Keep the observation so a mid-scan substitution still refuses recovery.
+      if (stat.isFile() && /(?:^|\/)node_modules\/\.package-lock\.json$/u.test(relative)) {
+        return;
       }
-      digest.update(JSON.stringify([relative, fields]));
+      const info = metadata(stat);
+      const fields = new Map(Object.entries(info));
+      // npm bin repair chmods files; external hardlink removal changes nlink/ctime.
+      // Keep inode, permissions and hashes strict; directory clocks/size also
+      // change when npm replaces its hidden cache. Within-read checks stay strict.
+      const retained = [info["dev:ino"], info.mode, info.uid, info.gid];
+      if (!stat.isDirectory()) {
+        retained.push(info.size, info.mtimeNs);
+      }
       if (stat.isSymbolicLink()) {
         const target = await read(() => fs.readlink(file));
         const resolved = path.relative(
@@ -241,16 +351,13 @@ export function createPackageIntegrityReader(timeoutMs = MAX_SCAN_MS) {
         ) {
           throw new Error("Package rollback symlink leaves the retained tree");
         }
-        digest.update(JSON.stringify(["symlink", target]));
+        fields.set("target", target);
+        retained.push("symlink", target);
       } else if (stat.isFile()) {
         const contents = await hashFile(file, stat, MAX_TREE_BYTES - bytes);
         bytes += contents.bytes;
-        const key = identity(stat);
-        const owner = stat.nlink > 1n ? (hardlinks.get(key) ?? relative) : null;
-        if (owner !== null) {
-          hardlinks.set(key, owner);
-        }
-        digest.update(JSON.stringify(["file", owner, contents.digest]));
+        fields.set("sha256", contents.digest);
+        retained.push("file", contents.digest);
       } else if (stat.isDirectory()) {
         const children = await entries(file, remainingEntries);
         // Reserve pending siblings before descending so wide ancestor lists
@@ -262,6 +369,9 @@ export function createPackageIntegrityReader(timeoutMs = MAX_SCAN_MS) {
       } else {
         throw new Error("Package rollback contains a non-file entry");
       }
+      const retainedEntry = JSON.stringify([relative, retained]);
+      digest.update(retainedEntry);
+      entriesObserved.set(relative, { fields, retained: retainedEntry });
     }
 
     await visit(root, "");
@@ -276,7 +386,9 @@ export function createPackageIntegrityReader(timeoutMs = MAX_SCAN_MS) {
         throw new Error("Package rollback tree changed during verification");
       }
     }
-    return { digest: digest.digest("hex"), identity: rootIdentity, version };
+    const fingerprint = { digest: digest.digest("hex"), identity: rootIdentity, version };
+    observations.set(fingerprint, entriesObserved);
+    return fingerprint;
   }
 
   async function rootEntry(
@@ -297,10 +409,25 @@ export function createPackageIntegrityReader(timeoutMs = MAX_SCAN_MS) {
     }
     // npm owns this pointer, not the external checkout it names. A sibling
     // rename changes ctime but must preserve the link identity and raw target.
-    return { kind: "link", metadata: metadata(stat).slice(0, -1), target };
+    return { kind: "link", metadata: Object.values(metadata(stat)).slice(0, -1), target };
   }
 
-  async function launcher(file: string): Promise<string> {
+  async function directoryIdentity(root: string): Promise<PackageDirectoryIdentity | null> {
+    const stat = await read(() => fs.lstat(root, { bigint: true }));
+    if (stat.isSymbolicLink()) {
+      return null;
+    }
+    if (!stat.isDirectory() || stat.ino === 0n) {
+      throw new Error("Package rollback filesystem identity is unavailable");
+    }
+    const version = await read(() => readPackageVersion(root, { maxBytes: MAX_MANIFEST_BYTES }));
+    if (!version || !unchanged(stat, await read(() => fs.lstat(root, { bigint: true })))) {
+      throw new Error("Package rollback identity changed or version is unavailable");
+    }
+    return { identity: identity(stat), version };
+  }
+
+  async function launcher(file: string): Promise<PackageLauncherFingerprint> {
     const stat = await read(() => fs.lstat(file, { bigint: true }));
     const contents = stat.isSymbolicLink()
       ? await read(() => fs.readlink(file))
@@ -308,15 +435,13 @@ export function createPackageIntegrityReader(timeoutMs = MAX_SCAN_MS) {
     if (!unchanged(stat, await read(() => fs.lstat(file, { bigint: true })))) {
       throw new Error("Package rollback launcher changed during verification");
     }
-    // Launchers are copied, unlike the package tree. Their copy is compared
-    // with the captured contents/target and permissions, not the new inode.
-    return JSON.stringify([
-      stat.isSymbolicLink() ? "symlink" : "file",
-      stat.mode.toString(),
-      stat.uid.toString(),
-      stat.gid.toString(),
+    return {
+      type: stat.isSymbolicLink() ? "symlink" : "file",
+      mode: stat.mode.toString(),
+      uid: stat.uid.toString(),
+      gid: stat.gid.toString(),
       contents,
-    ]);
+    };
   }
 
   async function exists(file: string): Promise<boolean> {
@@ -331,5 +456,5 @@ export function createPackageIntegrityReader(timeoutMs = MAX_SCAN_MS) {
     }
   }
 
-  return { tree, rootEntry, launcher, exists, entries, observe };
+  return { tree, rootEntry, directoryIdentity, launcher, exists, entries, observe };
 }

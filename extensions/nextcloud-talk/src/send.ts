@@ -1,4 +1,3 @@
-// Nextcloud Talk plugin module implements send behavior.
 import { createMessageReceiptFromOutboundResults } from "openclaw/plugin-sdk/channel-outbound";
 import { readProviderJsonResponse } from "openclaw/plugin-sdk/provider-http";
 import {
@@ -6,16 +5,13 @@ import {
   renderMarkdownWithMarkers,
 } from "openclaw/plugin-sdk/text-chunking";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
-import {
-  readNextcloudTalkErrorBody,
-  releaseNextcloudTalkGuardedResponse,
-} from "./guarded-response.js";
+import { readNextcloudTalkErrorBody } from "./guarded-response.js";
 import { stripNextcloudTalkTargetPrefix } from "./normalize.js";
 import {
   convertMarkdownTables,
   fetchWithSsrFGuard,
   generateNextcloudTalkSignature,
-  getNextcloudTalkRuntime,
+  getOptionalNextcloudTalkRuntime,
   requireRuntimeConfig,
   resolveMarkdownTableMode,
   resolveNextcloudTalkAccount,
@@ -58,12 +54,11 @@ type NextcloudTalkSendOpts = {
   timeoutMs?: number;
 };
 
-function resolveCredentials(
-  explicit: { baseUrl?: string; secret?: string },
-  account: { baseUrl: string; secret: string; accountId: string },
-): { baseUrl: string; secret: string } {
-  const baseUrl = explicit.baseUrl?.trim() ?? account.baseUrl;
-  const secret = explicit.secret?.trim() ?? account.secret;
+function resolveNextcloudTalkSendContext(opts: NextcloudTalkSendOpts) {
+  const cfg = requireRuntimeConfig(opts.cfg, "Nextcloud Talk send") as CoreConfig;
+  const account = resolveNextcloudTalkAccount({ cfg, accountId: opts.accountId });
+  const baseUrl = opts.baseUrl?.trim() ?? account.baseUrl;
+  const secret = opts.secret?.trim() ?? account.secret;
 
   if (!baseUrl) {
     throw new Error(
@@ -72,11 +67,13 @@ function resolveCredentials(
   }
   if (!secret) {
     throw new Error(
-      `Nextcloud Talk bot secret missing for account "${account.accountId}" (set channels.nextcloud-talk.botSecret/botSecretFile or NEXTCLOUD_TALK_BOT_SECRET for default).`,
+      account.tokenStatus === "configured_unavailable"
+        ? `Nextcloud Talk bot secret is configured but unavailable for account "${account.accountId}" (check the configured channels.nextcloud-talk.botSecret/botSecretFile).`
+        : `Nextcloud Talk bot secret missing for account "${account.accountId}" (set channels.nextcloud-talk.botSecret/botSecretFile or NEXTCLOUD_TALK_BOT_SECRET for default).`,
     );
   }
 
-  return { baseUrl, secret };
+  return { cfg, account, baseUrl, secret };
 }
 
 function normalizeRoomToken(to: string): string {
@@ -87,64 +84,13 @@ function normalizeRoomToken(to: string): string {
   return normalized;
 }
 
-function resolveNextcloudTalkSendContext(opts: NextcloudTalkSendOpts): {
-  cfg: CoreConfig;
-  account: ReturnType<typeof resolveNextcloudTalkAccount>;
-  baseUrl: string;
-  secret: string;
-} {
-  const cfg = requireRuntimeConfig(opts.cfg, "Nextcloud Talk send") as CoreConfig;
-  const account = resolveNextcloudTalkAccount({
-    cfg,
-    accountId: opts.accountId,
-  });
-  const { baseUrl, secret } = resolveCredentials(
-    { baseUrl: opts.baseUrl, secret: opts.secret },
-    account,
-  );
-  return { cfg, account, baseUrl, secret };
-}
-
-function recordNextcloudTalkOutboundActivity(accountId: string): void {
-  try {
-    getNextcloudTalkRuntime().channel.activity.record({
-      channel: "nextcloud-talk",
-      accountId,
-      direction: "outbound",
-    });
-  } catch (error) {
-    if (!(error instanceof Error) || error.message !== "Nextcloud Talk runtime not initialized") {
-      throw error;
-    }
-  }
-}
-
-function createNextcloudTalkSendReceipt(params: {
-  messageId: string;
-  roomToken: string;
-  replyTo?: string;
-}) {
-  const messageId = params.messageId.trim();
-  return createMessageReceiptFromOutboundResults({
-    results:
-      messageId && messageId !== "unknown"
-        ? [
-            {
-              channel: "nextcloud-talk",
-              messageId,
-              conversationId: params.roomToken,
-            },
-          ]
-        : [],
-    kind: "text",
-    ...(params.replyTo ? { replyToId: params.replyTo } : {}),
-  });
-}
-
 export async function sendMessageNextcloudTalk(
   to: string,
   text: string,
-  opts: NextcloudTalkSendOpts,
+  opts: NextcloudTalkSendOpts & {
+    onPlatformSendDispatch?: () => Promise<void>;
+    assertDirectAdapterHandoff?: () => void;
+  },
 ): Promise<NextcloudTalkSendResult> {
   const { cfg, account, baseUrl, secret } = resolveNextcloudTalkSendContext(opts);
   const roomToken = normalizeRoomToken(to);
@@ -179,8 +125,10 @@ export async function sendMessageNextcloudTalk(
 
   const url = `${baseUrl}/ocs/v2.php/apps/spreed/api/v1/bot/${roomToken}/message`;
 
+  await opts.onPlatformSendDispatch?.();
   const { response, release } = await fetchWithSsrFGuard({
     url,
+    beforeRequest: opts.assertDirectAdapterHandoff,
     init: {
       method: "POST",
       headers: {
@@ -244,20 +192,34 @@ export async function sendMessageNextcloudTalk(
       console.log(`[nextcloud-talk] Sent message ${messageId} to room ${roomToken}`);
     }
 
-    recordNextcloudTalkOutboundActivity(account.accountId);
+    getOptionalNextcloudTalkRuntime()?.channel.activity.record({
+      channel: "nextcloud-talk",
+      accountId: account.accountId,
+      direction: "outbound",
+    });
 
+    const receiptMessageId = messageId.trim();
     return {
       messageId,
       roomToken,
-      receipt: createNextcloudTalkSendReceipt({
-        messageId,
-        roomToken,
-        ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
+      receipt: createMessageReceiptFromOutboundResults({
+        results:
+          receiptMessageId && receiptMessageId !== "unknown"
+            ? [
+                {
+                  channel: "nextcloud-talk",
+                  messageId: receiptMessageId,
+                  conversationId: roomToken,
+                },
+              ]
+            : [],
+        kind: "text",
+        ...(opts.replyTo ? { replyToId: opts.replyTo } : {}),
       }),
       timestamp,
     };
   } finally {
-    await releaseNextcloudTalkGuardedResponse({ response, release });
+    await release();
   }
 }
 
@@ -304,6 +266,6 @@ export async function sendReactionNextcloudTalk(
 
     return { ok: true };
   } finally {
-    await releaseNextcloudTalkGuardedResponse({ response, release });
+    await release();
   }
 }

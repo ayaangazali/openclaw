@@ -183,10 +183,6 @@ describe("native provider reasoning subscription", () => {
             return response;
           },
         );
-        console.log(
-          "bedrock-reasoning-trace",
-          JSON.stringify({ consumption, requestCount, thinking }),
-        );
         expect(requestCount).toBe(1);
         expect(thinking).toEqual([
           ...(consumption === "incremental" ? [{ text: "before", delta: "before" }] : []),
@@ -270,6 +266,7 @@ describe("runtime-context replay at prompt submission", () => {
         modelPrompt: text,
         onFinalPromptText: vi.fn(),
         onSteeringAcknowledged: vi.fn(),
+        persistToolResultProjections: async () => {},
         runtimeOnly: false,
         sessionPromptState,
         systemPrompt: session.systemPrompt,

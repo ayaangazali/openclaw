@@ -14,15 +14,14 @@ import {
 } from "./runtime-context-prompt.js";
 
 describe("runtime context prompt submission", () => {
-  it.each([
-    "visible ask",
-    "  keep literal whitespace  ",
-    `Quote ${INTERNAL_RUNTIME_CONTEXT_BEGIN} literally.`,
-  ])("does not derive provenance from prompt text: %s", (prompt) => {
-    expect(
-      resolveRuntimeContextPromptParts({ effectivePrompt: prompt, transcriptPrompt: prompt }),
-    ).toEqual({ prompt });
-  });
+  it.each(["  keep literal whitespace  ", `Quote ${INTERNAL_RUNTIME_CONTEXT_BEGIN} literally.`])(
+    "does not derive provenance from prompt text: %s",
+    (prompt) => {
+      expect(
+        resolveRuntimeContextPromptParts({ effectivePrompt: prompt, transcriptPrompt: prompt }),
+      ).toEqual({ prompt });
+    },
+  );
 
   it.each(["Hook summary: Hello", "Hello", "System event"])(
     "keeps repeated hook text while carrying explicit source context: %s",
@@ -48,7 +47,7 @@ describe("runtime context prompt submission", () => {
     ).toEqual({ prompt: "[OpenClaw heartbeat poll]", modelPrompt: "Check the deployment." });
   });
 
-  it("requires producer context for runtime-only system context", () => {
+  it("requires producer context for the runtime-only continuation prompt", () => {
     const fragments = [
       { kind: "runtime-instruction" as const, text: "Continue the background task." },
     ];

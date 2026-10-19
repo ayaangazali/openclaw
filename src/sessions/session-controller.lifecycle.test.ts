@@ -21,6 +21,7 @@ import {
   trackSessionControllerSourceWork,
 } from "./session-controller.mailbox.js";
 import { createReplyOperation } from "./session-controller.operation.js";
+import { onSessionLifecycleEvent, type SessionLifecycleEvent } from "./session-lifecycle-events.js";
 
 it.each([
   ["wait", "operation"],
@@ -886,5 +887,43 @@ it("keeps a queued turn behind compaction until the mutation finishes", async ()
   } finally {
     finishMutation.resolve();
     await Promise.allSettled([active, mutation, queued]);
+  }
+});
+
+it("publishes runtime settlement when a backend turn without an RPC source settles", async () => {
+  const events: SessionLifecycleEvent[] = [];
+  const unsubscribe = onSessionLifecycleEvent((event) => events.push(event));
+  try {
+    const maintenance = createReplyOperation({
+      sessionKey: "agent:main:gateway-started",
+      sessionId: "gateway-started-id",
+      resetTriggered: false,
+    });
+    maintenance.complete();
+    await maintenance.ownerSettlement;
+    expect(events).toEqual([]);
+    const operation = createReplyOperation({
+      sessionKey: "agent:main:gateway-started",
+      sessionId: "gateway-started-id",
+      resetTriggered: false,
+    });
+    operation.attachBackend({
+      kind: "embedded",
+      runId: "gateway-started-run",
+      cancel: () => {},
+      isStreaming: () => false,
+    });
+    operation.complete();
+    await operation.ownerSettlement;
+    expect(events).toEqual([
+      {
+        sessionKey: "agent:main:gateway-started",
+        agentId: "main",
+        reason: "agent.input.settled",
+        scope: "runtime",
+      },
+    ]);
+  } finally {
+    unsubscribe();
   }
 });

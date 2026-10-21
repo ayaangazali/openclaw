@@ -1,4 +1,5 @@
 // Run only against an already running isolated Gateway with synthetic state and authentication.
+import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -6,8 +7,12 @@ import { parseArgs } from "node:util";
 import { chromium, type WebSocket as PlaywrightWebSocket } from "playwright";
 import { PROTOCOL_VERSION } from "../../packages/gateway-protocol/src/version.ts";
 import { asOptionalRecord } from "../../packages/normalization-core/src/record-coerce.ts";
+import { buildControlUiSessionPath } from "../../packages/session-url-contract/src/index.ts";
+import { parseAgentSessionKey } from "../../packages/session-url-contract/src/session-key-normalization.ts";
 import type { ControlUiReadiness } from "../../ui/src/app/control-ui-readiness.ts";
+import type { ChatDetailsSession } from "../../ui/src/pages/chat/components/chat-details-session.tsx";
 import { resolvePlaywrightChromiumExecutablePath } from "../../ui/src/test-helpers/playwright-chromium.ts";
+import { mapColdLoadCpuProfile } from "../lib/control-ui-cold-load-trace.ts";
 import { createGatewayWsClient } from "../lib/gateway-ws-client.ts";
 import { parseStrictIntegerOption } from "../lib/strict-integer-option.ts";
 
@@ -25,8 +30,16 @@ const { values } = parseArgs({
     "load-path": { type: "string", default: "/dashboard" },
     "phase-seed": { type: "string", default: "1458" },
     "request-stacks": { type: "boolean", default: false },
+    "reload-census": { type: "boolean", default: false },
+    "asset-dir": { type: "string" },
+    "storage-state": { type: "string" },
     "expect-session": { type: "string" },
+    "min-sidebar-rows": { type: "string" },
     "open-details": { type: "boolean", default: false },
+    "activity-session": { type: "string" },
+    "activity-patch-sessions": { type: "string" },
+    "activity-cron": { type: "boolean", default: false },
+    "activity-models": { type: "string", default: "openai/gpt-5.6-sol,openai/gpt-5.6-luna" },
   },
 });
 if (!values.url || !values.output) {
@@ -62,6 +75,21 @@ if (values["load-runs"]) {
 }
 
 async function measureLoads(runs: number) {
+  const activityModels = values["activity-models"].split(",").filter(Boolean);
+  const patchSessions = values["activity-patch-sessions"]?.split(",").filter(Boolean) ?? [];
+  const activitySession = values["activity-session"] ?? patchSessions[0];
+  if (patchSessions.length && (values["activity-session"] || values["activity-cron"])) {
+    throw new Error(
+      "--activity-patch-sessions uses existing sessions and excludes turn/cron activity",
+    );
+  }
+  if (activitySession && (runs !== 1 || activityModels.length === 0)) {
+    throw new Error("Active session measurement requires --load-runs 1 and at least one model");
+  }
+  const cronSession = parseAgentSessionKey(values["activity-session"]);
+  if (values["activity-cron"] && cronSession?.rest !== "main") {
+    throw new Error("--activity-cron requires --activity-session agent:<agent-id>:main");
+  }
   const destination = new URL(values["load-path"], url);
   if (destination.origin !== url.origin) {
     throw new Error("--load-path must remain on the isolated Gateway origin");
@@ -73,10 +101,68 @@ async function measureLoads(runs: number) {
     args: ["--no-sandbox"],
   });
   const results: unknown[] = [];
+  const cleanupErrors: string[] = [];
+  let activityClient: ReturnType<typeof createGatewayWsClient> | undefined;
+  let activityCronJobId: string | undefined;
+  const activityRpc = async (method: string, params: unknown) => {
+    const response = await activityClient!.request(method, params, 60_000);
+    if (!response.ok) {
+      throw new Error(`${method}: ${JSON.stringify(response.error)}`);
+    }
+    return asOptionalRecord(response.payload);
+  };
   let random = integer(values["phase-seed"], "--phase-seed");
   try {
-    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
-    const installProbe = (captureStacks: boolean) => {
+    if (activitySession) {
+      const endpoint = new URL(url);
+      endpoint.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      endpoint.hash = "";
+      activityClient = createGatewayWsClient({ url: endpoint.href });
+      await activityClient.waitOpen();
+      const token = new URLSearchParams(url.hash.slice(1)).get("token");
+      await activityRpc("connect", {
+        minProtocol: PROTOCOL_VERSION,
+        maxProtocol: PROTOCOL_VERSION,
+        client: {
+          id: "gateway-client",
+          version: "1.0.0",
+          platform: process.platform,
+          mode: "backend",
+        },
+        role: "operator",
+        scopes: ["operator.admin", "operator.read", "operator.write"],
+        caps: [],
+        ...(token ? { auth: { token } } : {}),
+      });
+      if (!patchSessions.length) {
+        await activityRpc("sessions.create", {
+          key: activitySession,
+          visibility: "shared",
+          model: activityModels[0],
+        });
+      }
+    }
+    if (activityClient && values["activity-cron"]) {
+      const job = await activityRpc("cron.add", {
+        name: "Synthetic activity cron",
+        enabled: false,
+        schedule: { kind: "every", everyMs: 3_600_000 },
+        sessionTarget: "main",
+        agentId: cronSession!.agentId,
+        sessionKey: values["activity-session"],
+        wakeMode: "next-heartbeat",
+        payload: { kind: "systemEvent", text: "Synthetic activity measurement" },
+      });
+      if (typeof job?.id !== "string") {
+        throw new Error("cron.add did not return a job ID");
+      }
+      activityCronJobId = job.id;
+    }
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 1000 },
+      storageState: values["storage-state"],
+    });
+    const installProbe = (captureStacks: boolean, reloadCensus: boolean) => {
       const requests: Array<{
         method: string;
         params: unknown;
@@ -88,12 +174,16 @@ async function measureLoads(runs: number) {
         catalog?: unknown;
       }> = [];
       const tasks: Array<{ startTime: number; duration: number }> = [];
+      const frames: Array<{ startTime: number; duration: number; blockingDuration: number }> = [];
+      const rows: Array<{ atMs: number; count: number }> = [];
+      let rowSignature = "";
+      const queries = new Map<string, number>();
       const snapshots: Array<{ atMs: number; bytes: number; catalog: unknown }> = [];
       const events: Array<{ atMs: number; event: string; payload: unknown }> = [];
       // Preserve the native receiver explicitly when forwarding from the diagnostic wrapper.
       // oxlint-disable-next-line typescript/unbound-method
       const send = WebSocket.prototype.send;
-      const observed = new WeakSet<WebSocket>();
+      const NativeWebSocket = WebSocket;
       const pending = new Map<string, (typeof requests)[number]>();
       const catalogStatus = (
         payload:
@@ -102,6 +192,7 @@ async function measureLoads(runs: number) {
               pendingProviders?: unknown;
               refreshFailed?: unknown;
               sessionModelRevision?: unknown;
+              models?: unknown;
             }
           | undefined,
       ) => ({
@@ -109,6 +200,7 @@ async function measureLoads(runs: number) {
         pendingProviders: payload?.pendingProviders,
         refreshFailed: payload?.refreshFailed,
         sessionModelRevision: payload?.sessionModelRevision,
+        models: payload?.models,
       });
       Reflect.set(Error, "stackTraceLimit", 30);
       new PerformanceObserver((list) => {
@@ -116,63 +208,147 @@ async function measureLoads(runs: number) {
           ...list.getEntries().map(({ startTime, duration }) => ({ startTime, duration })),
         );
       }).observe({ type: "longtask", buffered: true });
-      WebSocket.prototype.send = function (data) {
-        if (!observed.has(this)) {
-          observed.add(this);
-          this.addEventListener("message", ({ data: message }) => {
-            if (typeof message !== "string") {
-              return;
-            }
-            const frame = JSON.parse(message);
-            if (frame.type === "event" && frame.event === "models.snapshot") {
-              snapshots.push({
-                atMs: performance.now(),
-                bytes: new TextEncoder().encode(message).length,
-                catalog: { ...catalogStatus(frame.payload?.catalog), scope: frame.payload?.scope },
-              });
-            }
-            if (
-              frame.type === "event" &&
-              ["chat.metadata.changed", "config.changed", "sessions.changed"].includes(frame.event)
-            ) {
-              events.push({
-                atMs: performance.now(),
-                event: frame.event,
-                payload: {
-                  changed: frame.payload?.changed,
-                  revision: frame.payload?.revision,
-                  sessionKey: frame.payload?.sessionKey,
-                  reason: frame.payload?.reason,
-                  agentId: frame.payload?.agentId,
-                  modelCatalogChanged: frame.payload?.modelCatalogChanged,
-                  commandsChanged: frame.payload?.commandsChanged,
-                  authChanged: frame.payload?.authChanged,
-                },
-              });
-            }
-            const request = frame.type === "res" ? pending.get(frame.id) : undefined;
-            if (request) {
-              pending.delete(frame.id);
-              request.responseAtMs = performance.now();
-              request.responseBytes = new TextEncoder().encode(message).length;
-              request.ok = frame.ok === true;
-              if (request.method === "models.list") {
-                request.catalog = catalogStatus(frame.payload);
+      if (reloadCensus) {
+        new PerformanceObserver((list) => {
+          for (const entry of list.getEntries()) {
+            frames.push({
+              startTime: entry.startTime,
+              duration: entry.duration,
+              blockingDuration: Reflect.get(entry, "blockingDuration"),
+            });
+          }
+        }).observe({ type: "long-animation-frame", buffered: true });
+        new MutationObserver(() => {
+          const keys = Array.from(
+            document.querySelectorAll("openclaw-app-sidebar [data-session-key]"),
+            (row) => row.getAttribute("data-session-key"),
+          );
+          const signature = keys.join("\n");
+          if (signature !== rowSignature) {
+            rowSignature = signature;
+            rows.push({ atMs: performance.now(), count: keys.length });
+          }
+        }).observe(document, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ["data-session-key"],
+        });
+      }
+      class ObservedWebSocket extends NativeWebSocket {
+        constructor(socketUrl: string | URL, protocols?: string | string[]) {
+          super(socketUrl, protocols);
+          this.addEventListener(
+            "message",
+            ({ data: message }) => {
+              if (typeof message !== "string") {
+                return;
               }
-            }
-          });
+              const frame = JSON.parse(message);
+              if (frame.type === "event" && frame.event === "models.snapshot") {
+                snapshots.push({
+                  atMs: performance.now(),
+                  bytes: new TextEncoder().encode(message).length,
+                  catalog: {
+                    ...catalogStatus(frame.payload?.catalog),
+                    scope: frame.payload?.scope,
+                  },
+                });
+              }
+              if (
+                frame.type === "event" &&
+                [
+                  "chat.metadata.changed",
+                  "config.changed",
+                  "sessions.changed",
+                  "cron",
+                  "chat",
+                  "agent",
+                ].includes(frame.event)
+              ) {
+                events.push({
+                  atMs: performance.now(),
+                  event: frame.event,
+                  payload: {
+                    changed: frame.payload?.changed,
+                    revision: frame.payload?.revision,
+                    key: frame.payload?.key,
+                    sessionKey: frame.payload?.sessionKey,
+                    ts: frame.payload?.ts,
+                    reason: frame.payload?.reason,
+                    phase: frame.payload?.phase,
+                    dataPhase: frame.payload?.data?.phase,
+                    agentId: frame.payload?.agentId,
+                    modelCatalogChanged: frame.payload?.modelCatalogChanged,
+                    commandsChanged: frame.payload?.commandsChanged,
+                    authChanged: frame.payload?.authChanged,
+                    catalogChanged: frame.payload?.catalogChanged,
+                    sessionModelRevision:
+                      frame.payload?.session?.sessionModelRevision ??
+                      frame.payload?.session?.full?.sessionModelRevision ??
+                      frame.payload?.session?.set?.sessionModelRevision,
+                    action: frame.payload?.action,
+                    state: frame.payload?.state,
+                    stream: frame.payload?.stream,
+                    runId: frame.payload?.runId,
+                  },
+                });
+              }
+              const request = frame.type === "res" ? pending.get(frame.id) : undefined;
+              if (request) {
+                pending.delete(frame.id);
+                request.responseAtMs = performance.now();
+                request.responseBytes = new TextEncoder().encode(message).length;
+                request.ok = frame.ok === true;
+                if (request.method === "models.list") {
+                  request.catalog = catalogStatus(frame.payload);
+                }
+              }
+            },
+            { capture: true },
+          );
         }
+      }
+      window.WebSocket = ObservedWebSocket;
+      NativeWebSocket.prototype.send = function (data) {
         if (typeof data === "string") {
           const frame = JSON.parse(data);
           if (
             frame.type === "req" &&
-            ["cron.list", "models.list", "users.self"].includes(frame.method)
+            (reloadCensus ||
+              ["cron.list", "models.list", "users.self", "sessions.describe"].includes(
+                frame.method,
+              ))
           ) {
+            let queryId: number | undefined;
+            if (reloadCensus) {
+              // Compare complete queries in memory; retain only keys and an opaque ID.
+              const canonical = JSON.stringify(frame.params, (_key, value) =>
+                value && typeof value === "object" && !Array.isArray(value)
+                  ? Object.fromEntries(
+                      Object.entries(value).toSorted(([a], [b]) => a.localeCompare(b)),
+                    )
+                  : value,
+              );
+              const identity = `${frame.method}:${canonical}`;
+              queryId = queries.get(identity);
+              if (queryId === undefined) {
+                queryId = queries.size + 1;
+                queries.set(identity, queryId);
+              }
+            }
             const request = {
               method: frame.method,
-              params: frame.params,
+              params: reloadCensus ? undefined : frame.params,
+              ...(reloadCensus
+                ? {
+                    paramKeys: Object.keys(frame.params ?? {}).toSorted(),
+                    queryId,
+                  }
+                : {}),
               requestedAtMs: performance.now(),
               stack: captureStacks ? new Error().stack : undefined,
+              precedingEvent: events.at(-1),
             };
             requests.push(request);
             pending.set(frame.id, request);
@@ -180,12 +356,31 @@ async function measureLoads(runs: number) {
         }
         return send.call(this, data);
       };
-      Reflect.set(window, "__catalogLoad", { requests, tasks, snapshots, events });
+      Reflect.set(window, "__catalogLoad", { requests, tasks, frames, rows, snapshots, events });
     };
     await context.addInitScript({
-      content: `;(() => { const __name = (target) => target; (${installProbe.toString()})(${values["request-stacks"]}); })();`,
+      content: `;(() => { const __name = (target) => target; (${installProbe.toString()})(${values["request-stacks"]}, ${values["reload-census"]}); })();`,
     });
     const page = await context.newPage();
+    const openDetails = async () => {
+      const details = page
+        .getByRole("complementary", { name: "Details", exact: true })
+        .or(page.getByRole("dialog", { name: "Details", exact: true }));
+      if (!(await details.isVisible())) {
+        await page
+          .getByRole("button", { name: "Details", exact: true })
+          .or(page.getByRole("button").and(page.locator(".chat-header-session-menu__trigger")))
+          .filter({ visible: true })
+          .first()
+          .click();
+        const menu = page.getByRole("menuitem", { name: "Session details", exact: true });
+        await details.or(menu).filter({ visible: true }).first().waitFor();
+        if (await menu.isVisible()) {
+          await menu.click();
+        }
+      }
+      await details.waitFor();
+    };
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     const scheduleStartAt = startAt ?? Date.now();
@@ -218,26 +413,183 @@ async function measureLoads(runs: number) {
         { timeout: 60_000 },
       );
       if (values["open-details"]) {
-        const details = page
-          .getByRole("complementary", { name: "Details", exact: true })
-          .or(page.getByRole("dialog", { name: "Details", exact: true }));
-        if (!(await details.isVisible())) {
-          await page
-            .getByRole("button", { name: "Details", exact: true })
-            .or(page.getByRole("button").and(page.locator(".chat-header-session-menu__trigger")))
-            .filter({ visible: true })
-            .first()
-            .click();
-          const menu = page.getByRole("menuitem", { name: "Session details", exact: true });
-          await details.or(menu).filter({ visible: true }).first().waitFor();
-          if (await menu.isVisible()) {
-            await menu.click();
-          }
-        }
-        await details.waitFor();
+        await openDetails();
       }
       const readyAtMs = await page.evaluate(() => performance.now());
-      await page.waitForTimeout(Math.max(0, durationMs - readyAtMs));
+      const activity: Array<{ method: string; atMs: number; elapsedMs: number; result?: unknown }> =
+        [];
+      let activityStartedAtMs: number | undefined;
+      let activityEndedAtMs: number | undefined;
+      if (activityClient) {
+        await page.waitForTimeout(5_000);
+        if (startAt !== undefined) {
+          const activityStartAt = scheduledAt + 30_000;
+          if (Date.now() > activityStartAt) {
+            throw new Error("Browser readiness missed the paired activity schedule");
+          }
+          await page.waitForTimeout(activityStartAt - Date.now());
+        }
+        activityStartedAtMs = await page.evaluate(() => performance.now());
+        const startedAt = Date.now();
+        for (let step = 0; step < Math.floor(durationMs / intervalMs); step += 1) {
+          await page.waitForTimeout(Math.max(0, startedAt + step * intervalMs - Date.now()));
+          const atMs = await page.evaluate(() => performance.now());
+          const started = Date.now();
+          if (patchSessions.length) {
+            const key = patchSessions[step % patchSessions.length]!;
+            const pathname = buildControlUiSessionPath({
+              namespace: "chat",
+              sessionKey: key,
+              exactKey: true,
+            });
+            if (!pathname) {
+              throw new Error(`Invalid synthetic session key: ${key}`);
+            }
+            await page.evaluate(
+              (nextPath) => window.openclawControlUi!.navigate("chat", { pathname: nextPath }),
+              pathname,
+            );
+            await page.waitForFunction(
+              (nextKey) => window.openclawControlUi?.snapshot().sessionKey === nextKey,
+              key,
+            );
+            await activityRpc("sessions.patch", { key, label: `Synthetic activity ${step}` });
+            activity.push({ method: "sessions.patch", atMs, elapsedMs: Date.now() - started });
+            continue;
+          }
+          const key = values["activity-session"]!;
+          const kind = step % (activityCronJobId ? 5 : 4);
+          const method = kind === 4 ? "cron.run" : kind === 3 ? "chat.send" : "sessions.patch";
+          const params =
+            kind < 2
+              ? {
+                  key,
+                  model:
+                    activityModels[
+                      Math.floor(step / (activityCronJobId ? 5 : 4)) % activityModels.length
+                    ],
+                  ...(kind === 1 ? { label: `Synthetic active session ${step}` } : {}),
+                }
+              : kind === 2
+                ? {
+                    key,
+                    pinned: Math.floor(step / 4) % 2 === 0,
+                    statusNote: `Synthetic activity ${step}`,
+                    thinkingLevel: "off",
+                  }
+                : kind === 4
+                  ? { id: activityCronJobId, mode: "force", waitTimeoutMs: 30_000 }
+                  : {
+                      sessionKey: key,
+                      message: "Reply with a short synthetic measurement response.",
+                      deliver: false,
+                      idempotencyKey: randomUUID(),
+                    };
+          const result = await activityRpc(method, params);
+          let completionStatus: string | undefined;
+          if (method === "chat.send") {
+            if (typeof result?.runId !== "string") {
+              throw new Error("chat.send did not return a run ID");
+            }
+            const terminal = await activityRpc("agent.wait", {
+              runId: result.runId,
+              timeoutMs: 30_000,
+            });
+            if (terminal?.status !== "ok") {
+              throw new Error(`Synthetic turn did not complete: ${JSON.stringify(terminal)}`);
+            }
+            completionStatus = terminal.status;
+          } else if (method === "cron.run") {
+            if (typeof result?.runId !== "string" || (!result.finished && !result.run)) {
+              throw new Error("Cron run did not finish within the bounded wait");
+            }
+            await page.waitForFunction(
+              (runId) =>
+                Reflect.get(window, "__catalogLoad").events.some(
+                  (event: { event: string; payload: { action?: string; runId?: string } }) =>
+                    event.event === "cron" &&
+                    event.payload.action === "finished" &&
+                    event.payload.runId === runId,
+                ),
+              result.runId,
+              { timeout: 30_000 },
+            );
+            completionStatus = "finished";
+          }
+          activity.push({
+            method,
+            atMs,
+            elapsedMs: Date.now() - started,
+            result: completionStatus
+              ? { runId: result?.runId, status: completionStatus }
+              : undefined,
+          });
+        }
+        await page.waitForTimeout(Math.max(0, startedAt + durationMs - Date.now()));
+        activityEndedAtMs = await page.evaluate(() => performance.now());
+      } else {
+        await page.waitForTimeout(Math.max(0, durationMs - readyAtMs));
+      }
+      let detailsVerification: unknown;
+      if (activityClient && values["open-details"]) {
+        await openDetails();
+        const key = await page.evaluate(() => window.openclawControlUi?.snapshot().sessionKey);
+        const descriptor = await activityRpc("sessions.describe", { key });
+        const session = asOptionalRecord(descriptor?.session);
+        if (!session || session.key !== key) {
+          throw new Error("Final descriptor did not match the visible conversation");
+        }
+        const fields = [
+          "key",
+          "sessionId",
+          "label",
+          "model",
+          "modelProvider",
+          "activeModel",
+          "statusNote",
+          "thinkingLevel",
+        ];
+        const expected = Object.fromEntries(fields.map((field) => [field, session[field] ?? null]));
+        await page.waitForFunction(
+          (expectedFields) => {
+            const details = Array.from(
+              document.querySelectorAll<ChatDetailsSession>("openclaw-chat-details-session"),
+            ).find((element) => element.presented && element.checkVisibility());
+            const selected = details?.props?.selectedSession;
+            return (
+              selected &&
+              Object.entries(expectedFields).every(
+                ([field, value]) => (Reflect.get(selected, field) ?? null) === value,
+              )
+            );
+          },
+          expected,
+          { timeout: 10_000 },
+        );
+        if (typeof session.label === "string" && session.label) {
+          await page
+            .locator(".chat-pane__header")
+            .filter({ visible: true })
+            .getByText(session.label, { exact: true })
+            .filter({ visible: true })
+            .first()
+            .waitFor();
+        }
+        const displayedModel = session.activeModel || session.model;
+        if (typeof displayedModel === "string" && displayedModel) {
+          await page
+            .locator(".chat-details__environment")
+            .filter({ visible: true })
+            .getByText(displayedModel, { exact: true })
+            .waitFor();
+        }
+        detailsVerification = {
+          server: expected,
+          presentedDetailsInputMatch: true,
+          visibleDetailsModel: displayedModel,
+          visibleConversationLabel: session.label,
+        };
+      }
       const result = await page.evaluate(() => {
         const probe = Reflect.get(window, "__catalogLoad");
         return {
@@ -254,6 +606,33 @@ async function measureLoads(runs: number) {
           atMs: performance.now(),
         };
       });
+      if (values["asset-dir"] && values["request-stacks"]) {
+        for (const request of result.requests) {
+          const frames = String(request.stack ?? "")
+            .split("\n")
+            .flatMap((line) => {
+              const match = line.match(/(https?:\/\/[^\s)]+):(\d+):(\d+)/u);
+              return match
+                ? [
+                    {
+                      id: 0,
+                      callFrame: {
+                        functionName: line.trim().replace(/\s*\(?https?:.*$/u, ""),
+                        url: match[1]!,
+                        lineNumber: Number(match[2]) - 1,
+                        columnNumber: Number(match[3]) - 1,
+                      },
+                    },
+                  ]
+                : [];
+            });
+          const mapped = await mapColdLoadCpuProfile(
+            { nodes: frames },
+            { assetBaseUrl: new URL("/assets/", url).href, assetDirectory: values["asset-dir"] },
+          );
+          request.callers = mapped.profile.nodes.map(({ callFrame }) => callFrame);
+        }
+      }
       results.push({
         run,
         phaseDelayMs,
@@ -261,20 +640,53 @@ async function measureLoads(runs: number) {
         actualWallStartAtMs,
         readyAtMs,
         errors: errors.splice(0),
+        activity,
+        activityStartedAtMs,
+        activityEndedAtMs,
+        detailsVerification,
+        activityBlockingMs: result.tasks
+          .filter(
+            (task: { startTime: number }) =>
+              activityStartedAtMs !== undefined && task.startTime >= activityStartedAtMs,
+          )
+          .reduce(
+            (sum: number, task: { duration: number }) => sum + Math.max(0, task.duration - 50),
+            0,
+          ),
         ...result,
       });
+      if (
+        values["min-sidebar-rows"] &&
+        (result.rows.at(-1)?.count ?? 0) < integer(values["min-sidebar-rows"], "--min-sidebar-rows")
+      ) {
+        throw new Error("Sidebar did not load the expected fixture rows");
+      }
       if (values.screenshot && run === runs - 1) {
         await page.screenshot({ path: values.screenshot, fullPage: true });
       }
     }
   } finally {
-    await browser.close();
+    if (activityClient && activityCronJobId) {
+      try {
+        await activityRpc("cron.remove", { id: activityCronJobId });
+      } catch (error) {
+        cleanupErrors.push(`cron.remove: ${String(error)}`);
+      }
+    }
+    activityClient?.close();
+    try {
+      await browser.close();
+    } catch (error) {
+      cleanupErrors.push(`browser.close: ${String(error)}`);
+    }
     const report = {
       measurement:
-        "Real isolated Gateway browser loads. Native long-task blocking is sum(max(duration - 50 ms, 0)); request stack capture adds diagnostic overhead. First context is cold, subsequent documents retain browser cache and storage. Matching seeds randomize reload phase equally across paired sides. Synthetic request parameters and stacks are retained; auth and response payloads are not.",
+        "Real isolated Gateway browser loads. Native long-task blocking is sum(max(duration - 50 ms, 0)); request stack capture adds diagnostic overhead. First context is cold, subsequent documents retain browser cache and storage. Matching seeds randomize reload phase equally across paired sides. Reload census retains parameter keys and opaque query IDs; other modes retain synthetic parameters. Sidebar row milestones describe DOM inventory, not paint or authoritative freshness.",
       durationMs,
       requestStacks: values["request-stacks"],
+      reloadCensus: values["reload-census"],
       path: values["load-path"],
+      cleanupErrors,
       results,
     };
     await mkdir(path.dirname(path.resolve(values.output!)), { recursive: true });

@@ -28,6 +28,7 @@ it("retains loading panel contents when fitting a new layout snapshot", () => {
         callbacks={{
           activatePanel() {},
           togglePanelExpanded() {},
+          setDock() {},
           closeSlot() {},
           openSlot() {},
           reorderPanel() {},
@@ -73,6 +74,7 @@ it("retains the primary input and the region-owned outlet while changing the lay
         callbacks={{
           activatePanel() {},
           togglePanelExpanded() {},
+          setDock() {},
           closeSlot() {},
           openSlot() {},
           reorderPanel() {},
@@ -132,6 +134,7 @@ it("parks on owner events and reveals with the parent's next props", () => {
 
 it("releases region refs when the lazy host or its containing view unmounts", () => {
   let regionElement: HTMLElement | null = null;
+  let headerElement: HTMLElement | null = null;
   let regionView: HTMLElementTagNameMap["openclaw-chat-sidebar-region"] | null = null;
   let loading: (value: boolean) => void = () => {};
   const mounted = mountSolid(() => {
@@ -148,6 +151,7 @@ it("releases region refs when the lazy host or its containing view unmounts", ()
         callbacks={{
           activatePanel() {},
           togglePanelExpanded() {},
+          setDock() {},
           closeSlot() {},
           openSlot() {},
           reorderPanel() {},
@@ -171,18 +175,27 @@ it("releases region refs when the lazy host or its containing view unmounts", ()
             }
           };
         }}
+        onHeaderElementRef={(element) => {
+          headerElement = element;
+          return () => {
+            headerElement = null;
+          };
+        }}
       />
     );
   });
   flush();
   const shell = regionElement;
   const firstView = regionView;
+  const header = headerElement;
   expect(shell).toBe(mounted.container.querySelector(".sidebar-region"));
+  expect(header).toBe(mounted.container.querySelector(".sidebar-region__header"));
   expect(firstView).toBe(mounted.container.querySelector("openclaw-chat-sidebar-region"));
   loading(true);
   flush();
   expect(regionView).toBeNull();
   expect(regionElement).toBe(shell);
+  expect(headerElement).toBe(header);
   loading(false);
   flush();
   expect(regionView).not.toBeNull();
@@ -190,4 +203,5 @@ it("releases region refs when the lazy host or its containing view unmounts", ()
   mounted.unmount();
   expect(regionView).toBeNull();
   expect(regionElement).toBeNull();
+  expect(headerElement).toBeNull();
 });
